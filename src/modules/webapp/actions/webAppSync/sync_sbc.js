@@ -1171,6 +1171,7 @@
         let response = null;
         try {
           response = await this.post("sbc/sync-screen-data-by-category", {
+            user_id: 1,
             category_id: Number(categoryId),
             screen_tiles: tileInfos
           });
