@@ -12,7 +12,6 @@ const EXTENSION_OPERATIONS = (document.body.dataset.operations || EXTENSION_CONT
   .map((operation) => operation.trim())
   .filter(Boolean);
 const elements = {
-  apiEnvironmentButtons: [...document.querySelectorAll(".environment-button")],
   waitMs: $("#waitMs"),
   start: $("#start"),
   stop: $("#stop"),
@@ -48,7 +47,6 @@ let currentLogs = [];
 let currentErrors = [];
 let currentContentTab = EXTENSION_CONTENT;
 let currentListTab = EXTENSION_CONTENT;
-let selectedApiBaseUrl = DEFAULT_API_BASE_URL;
 const collapsedCoinSections = new Set();
 const collapsedCycleGroups = new Set();
 const expandedCycleGroups = new Set();
@@ -61,9 +59,7 @@ setInterval(renderCountdown, 250);
 async function init() {
   await API_CONFIG.ready;
   DEFAULT_API_BASE_URL = API_CONFIG.defaultBaseUrl();
-  selectedApiBaseUrl = DEFAULT_API_BASE_URL;
-  const settings = await chrome.storage.local.get(["syncApiBaseUrl", "syncWaitMs", "syncListTab", "syncContentTab", "syncActiveContentTabs"]);
-  setApiEnvironment(DEFAULT_API_BASE_URL);
+  const settings = await chrome.storage.local.get(["syncWaitMs", "syncListTab", "syncContentTab", "syncActiveContentTabs"]);
   setActiveContentTabs(settings.syncActiveContentTabs);
   elements.waitMs.value = String(settings.syncWaitMs || 5000);
   setContentTab(settings.syncContentTab || contentNameForList(settings.syncListTab) || EXTENSION_CONTENT);
@@ -86,7 +82,6 @@ elements.start.addEventListener("click", async () => {
   const response = await chrome.runtime.sendMessage({
     futbinSyncModule: MODULE_NAME,
     type: "START_SYNC",
-    apiBaseUrl: selectedApiBaseUrl,
     waitMs: Number(elements.waitMs.value),
     operations
   });
@@ -106,15 +101,9 @@ elements.stop.addEventListener("click", async () => {
 
 elements.clear.addEventListener("click", async () => {
   if (!confirm("Tarama ilerlemesi ve gösterilen oyuncular temizlensin mi?")) return;
-  await chrome.runtime.sendMessage({ futbinSyncModule: MODULE_NAME, type: "CLEAR_SYNC", apiBaseUrl: selectedApiBaseUrl });
+  await chrome.runtime.sendMessage({ futbinSyncModule: MODULE_NAME, type: "CLEAR_SYNC" });
 });
 
-elements.apiEnvironmentButtons.forEach((button) => {
-  button.addEventListener("click", async () => {
-    setApiEnvironment(API_CONFIG.baseUrlFor(button.dataset.apiEnv));
-    await saveSettings();
-  });
-});
 elements.waitMs.addEventListener("change", saveSettings);
 
 elements.contentTabs.forEach((tab) => {
@@ -216,7 +205,6 @@ function openSyncRow(event) {
 
 async function saveSettings() {
   await chrome.storage.local.set({
-    syncApiBaseUrl: selectedApiBaseUrl,
     syncWaitMs: Number(elements.waitMs.value),
     syncOperations: allSyncOperations(),
     syncContentTab: currentContentTab,
@@ -295,16 +283,6 @@ function selectedContentTab() {
 
 function contentNameForList(listName) {
   return elements.contentTabs.find((tab) => tab.dataset.list === listName)?.dataset.content || EXTENSION_CONTENT;
-}
-
-function setApiEnvironment(apiBaseUrl) {
-  selectedApiBaseUrl = API_CONFIG.allowedBaseUrl(apiBaseUrl || API_CONFIG.defaultBaseUrl());
-  elements.apiEnvironmentButtons.forEach((button) => {
-    const buttonApiBaseUrl = API_CONFIG.baseUrlFor(button.dataset.apiEnv);
-    const isActive = buttonApiBaseUrl === selectedApiBaseUrl;
-    button.classList.toggle("active", isActive);
-    button.setAttribute("aria-pressed", String(isActive));
-  });
 }
 
 function currentAction() {
@@ -430,7 +408,6 @@ function render(state = {}, records = [], logs = [], errors = []) {
   }
   elements.start.disabled = Boolean(viewState.running || viewState.userStarted) || !allSyncOperations().length;
   elements.stop.disabled = !viewState.running && !viewState.userStarted;
-  elements.apiEnvironmentButtons.forEach((button) => { button.disabled = Boolean(viewState.running || viewState.userStarted); });
   elements.contentTabCheckboxes.forEach((checkbox) => {
     const hasOperation = contentTabHasOperation(checkbox.dataset.contentActive);
     checkbox.disabled = !hasOperation;

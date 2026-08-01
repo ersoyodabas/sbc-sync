@@ -42,7 +42,7 @@ const MAX_ERRORS = 300;
 const FUTBIN_LATEST_URL = "https://www.futbin.com/latest";
 const WEB_APP_URL = "https://www.ea.com/ea-sports-fc/ultimate-team/web-app/";
 const WEB_APP_SYNC_ENDPOINT = "sync/web-app";
-const NEW_SBC_TELEGRAM_ENDPOINT = "telegram/notify-new-sbcs-arrived";
+const NEW_SBC_TELEGRAM_ENDPOINT = "notify/notify-new-sbcs-arrived";
 const LATEST_COIN_CARD_PAGES = 2;
 const SPECIAL_QUALITY_IMAGE_URL = "https://cdn3.futbin.com/content/fifa26/img/cards/tiny/3_gold.png?fm=png&ixlib=java-2.1.0&verzion=1&w=128&s=d72e95665680dee8e3818602d714323a";
 const EXTENSION_RUNNER_ID = "web-app-sync";
@@ -1587,6 +1587,26 @@ async function handleWebAppSyncComplete(message, sender) {
     scheduleTime: watchdogConfig.targetTime,
     source: "sync-complete"
   });
+  const startSbcPlayersBatch = globalThis.FutbinSyncModuleControls?.sbcPlayers?.startWebAppBatch;
+  const batchStartPromise = typeof startSbcPlayersBatch === "function"
+    ? startSbcPlayersBatch()
+    : Promise.reject(new Error("SBC Players kontrol modülü yüklenmedi."));
+  batchStartPromise.then(async (response) => {
+    await appendWebAppSchedulerLog(
+      response?.ok ? "SBC Players batch started" : "SBC Players batch could not start",
+      {
+        maxRuns: 5,
+        intervalMinutes: 10,
+        error: response?.ok ? null : response?.error || "Bilinmeyen hata"
+      }
+    );
+  }).catch(async (error) => {
+    await appendWebAppSchedulerLog("SBC Players batch could not start", {
+      maxRuns: 5,
+      intervalMinutes: 10,
+      error: error.message || String(error)
+    });
+  });
   return { ok: true, state: waiting };
 }
 
@@ -2171,7 +2191,9 @@ async function failSync(error, currentState = null) {
 }
 
 async function apiRequest(apiBaseUrl, endpoint, options = {}) {
-  const url = new URL(endpoint, apiBaseUrl).href;
+  await API_CONFIG.ready;
+  void apiBaseUrl;
+  const url = new URL(endpoint, API_CONFIG.defaultBaseUrl()).href;
   const method = options.method || "GET";
   const body = options.body;
   let response;

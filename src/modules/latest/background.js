@@ -2,6 +2,7 @@ const STATE_KEY = "latestSyncState";
 const RECORDS_KEY = "latestPlayerRecords";
 const LOGS_KEY = "latestSyncLogs";
 const ERRORS_KEY = "latestSyncErrors";
+const AUTO_RUN_KEY = "latestAutoRunEnabled";
 const PAGE_TIMEOUT_ALARM = "latest-futbin-sync-page-timeout";
 const JOB_ADVANCE_ALARM = "latest-futbin-sync-job-advance";
 const SYNC_LOOP_ALARM = "latest-futbin-sync-loop";
@@ -99,16 +100,23 @@ const emptyState = {
 };
 
 chrome.runtime.onInstalled.addListener(async () => {
-  const saved = await chrome.storage.local.get([STATE_KEY, RECORDS_KEY, LOGS_KEY, ERRORS_KEY]);
+  await API_CONFIG.ready;
+  const saved = await chrome.storage.local.get([STATE_KEY, RECORDS_KEY, LOGS_KEY, ERRORS_KEY, AUTO_RUN_KEY]);
   if (!saved[STATE_KEY]) await setState(emptyState);
   if (!saved[RECORDS_KEY]) await chrome.storage.local.set({ [RECORDS_KEY]: [] });
   if (!saved[LOGS_KEY]) await chrome.storage.local.set({ [LOGS_KEY]: [] });
   if (!saved[ERRORS_KEY]) await chrome.storage.local.set({ [ERRORS_KEY]: [] });
+  if (typeof saved[AUTO_RUN_KEY] !== "boolean") {
+    await chrome.storage.local.set({
+      [AUTO_RUN_KEY]: !saved[STATE_KEY] || !isFinishedState(saved[STATE_KEY])
+    });
+  }
+  await ensureLatestAutoRun("extension-installed");
 });
 
 chrome.runtime.onStartup.addListener(async () => {
-  syncLog("Eklenti başlangıcı; yarım kalan çalışma kontrol ediliyor");
-  await resumeRunningSync();
+  syncLog("Eklenti başlangıcı; Latest otomatik çalışma kontrol ediliyor");
+  await ensureLatestAutoRun("browser-startup");
 });
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
@@ -136,10 +144,12 @@ globalThis.FutbinSyncModuleControls.latest = {
 async function handleMessage(message, sender) {
   switch (message?.type) {
     case "START_SYNC":
+      await chrome.storage.local.set({ [AUTO_RUN_KEY]: true });
       return startParallelSync(message.apiBaseUrl, message.waitMs, message.operations);
     case "RESUME_SYNC":
       return resumePausedSync();
     case "STOP_SYNC":
+      await chrome.storage.local.set({ [AUTO_RUN_KEY]: false });
       return pauseSync(message.operations);
     case "PAUSE_FOR_SBC_PLAYERS":
       return pauseForSbcPlayers();
@@ -160,7 +170,7 @@ async function handleMessage(message, sender) {
       }
       await setState({ ...emptyState, apiBaseUrl: message.apiBaseUrl || emptyState.apiBaseUrl });
       await chrome.storage.local.set({ [RECORDS_KEY]: [], [LOGS_KEY]: [], [ERRORS_KEY]: [] });
-      return { ok: true };
+      return ensureLatestAutoRun("clear-completed");
     case "GET_SNAPSHOT":
       // Önceki sürümlerden kalan büyük popup koleksiyonunu da temizle.
       {
@@ -187,6 +197,32 @@ async function handleMessage(message, sender) {
     default:
       return { ok: false, error: "Bilinmeyen mesaj" };
   }
+}
+
+async function ensureLatestAutoRun(reason) {
+  await API_CONFIG.ready;
+  const stored = await chrome.storage.local.get(AUTO_RUN_KEY);
+  if (stored[AUTO_RUN_KEY] === false) {
+    syncLog("Latest otomatik başlangıç kullanıcı Stop tercihi nedeniyle atlandı", { reason });
+    return { ok: true, skipped: true, reason: "user-stopped" };
+  }
+
+  await chrome.storage.local.set({ [AUTO_RUN_KEY]: true });
+  await resumeRunningSync();
+  const state = await getState(EXTENSION_RUNNER_ID);
+  if (state.running || (state.userStarted && state.nextRunAt)) {
+    if (!state.running && state.userStarted && state.nextRunAt) {
+      await startImportantAfterLatestCompletion();
+    }
+    return { ok: true, resumed: true, state };
+  }
+
+  syncLog("Latest otomatik çalışma başlatılıyor", { reason });
+  return startParallelSync(
+    API_CONFIG.defaultBaseUrl(),
+    API_CONFIG.number("WAIT_MS", 5000),
+    EXTENSION_OPERATIONS
+  );
 }
 
 async function startParallelSync(rawApiBaseUrl, rawWaitMs, rawOperations) {
@@ -1993,21 +2029,31 @@ async function failSync(error, currentState = null) {
   await chrome.alarms.clear(pageTimeoutAlarmName(state));
   await chrome.alarms.clear(jobAdvanceAlarmName(state));
   await chrome.alarms.clear(syncLoopAlarmName(state));
+  const stored = await chrome.storage.local.get(AUTO_RUN_KEY);
+  const autoRunEnabled = stored[AUTO_RUN_KEY] !== false;
+  const nextRunAt = autoRunEnabled ? Date.now() + SYNC_LOOP_DELAY_MS : null;
   const failed = {
     ...state,
     running: false,
-    userStarted: false,
-    tabId: state.tabId,
-    nextRunAt: null,
-    status: error,
+    userStarted: autoRunEnabled,
+    queue: [],
+    currentJobIndex: -1,
+    currentUrl: null,
+    tabId: null,
+    nextRunAt,
+    status: autoRunEnabled ? `${error}; otomatik tekrar bekleniyor` : error,
     error,
     updatedAt: Date.now()
   };
   await setState(failed);
+  await closeRunnerTab(state.tabId, state);
+  if (autoRunEnabled) await scheduleLoopAlarm(failed);
 }
 
 async function apiRequest(apiBaseUrl, endpoint, options = {}) {
-  const url = new URL(endpoint, apiBaseUrl).href;
+  await API_CONFIG.ready;
+  void apiBaseUrl;
+  const url = new URL(endpoint, API_CONFIG.defaultBaseUrl()).href;
   const method = options.method || "GET";
   const body = options.body;
   let response;
@@ -2804,7 +2850,29 @@ async function scheduleNextLoop(state, totalSaved, totalSkipped, clubSaveResults
   await setState(waiting);
   await closeRunnerTab(state.tabId, state);
   await scheduleLoopAlarm(waiting);
+  startImportantAfterLatestCompletion().catch((error) => {
+    syncError("Latest sonrası Important Players başlatılamadı", error);
+  });
   return { ok: true, action: "COMPLETED", state: waiting };
+}
+
+async function startImportantAfterLatestCompletion() {
+  const startImportant = globalThis.FutbinSyncModuleControls?.important?.startAfterLatest;
+  if (typeof startImportant !== "function") {
+    throw new Error("Important Players kontrol modülü yüklenmedi.");
+  }
+  try {
+    const response = await startImportant();
+    syncLog("Latest sonrası Important Players kontrolü tamamlandı", {
+      started: response?.ok === true && response?.skipped !== true,
+      skipped: response?.skipped === true,
+      reason: response?.reason || null
+    });
+    return response;
+  } catch (error) {
+    syncError("Latest sonrası Important Players başlatılamadı", error);
+    throw error;
+  }
 }
 
 async function scheduleJobAdvance(state) {

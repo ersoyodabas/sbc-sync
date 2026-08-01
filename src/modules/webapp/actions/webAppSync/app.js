@@ -128,9 +128,10 @@
   function resolveWebAppApiBaseUrl() {
     if (apiBaseUrlPromise) return apiBaseUrlPromise;
     apiBaseUrlPromise = (async () => {
+      await window.FutbinSyncApiConfig?.ready;
       const fromConfig = window.FutbinSyncApiConfig?.defaultBaseUrl?.();
-      if (fromConfig) return normalizeBaseUrl(fromConfig);
-      return "";
+      if (!fromConfig) throw new Error("API_BASE_URL .env dosyasından yüklenemedi.");
+      return normalizeBaseUrl(fromConfig);
     })();
     return apiBaseUrlPromise;
   }

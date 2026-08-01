@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
-  "name": "Daily Sync",
-  "version": "1.0.0",
+  "name": "Sync",
+  "version": "2.0.0",
   "description": "Futbin ve EA FC Web App senkronizasyonlarını tek dashboard üzerinden yönetir.",
   "permissions": ["storage", "alarms", "offscreen", "tabs", "scripting", "debugger", "nativeMessaging"],
   "host_permissions": [

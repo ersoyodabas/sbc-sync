@@ -43,6 +43,10 @@ const emptyState = {
   savedPlayerCount: 0,
   skippedPlayerCount: 0,
   runCount: 0,
+  batchActive: false,
+  batchRunIndex: 0,
+  batchMaxRuns: 0,
+  batchIntervalMinutes: 0,
   status: "Hazır",
   error: null,
   nextRunAt: null,
@@ -92,7 +96,11 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
   await startSync({
     apiBaseUrl: state.apiBaseUrl || API_CONFIG.defaultBaseUrl(),
     waitMs: state.waitMs || API_CONFIG.number("WAIT_MS", 5000),
-    scheduled: true
+    scheduled: true,
+    batchMode: state.batchActive === true,
+    batchRunIndex: state.batchActive ? Number(state.batchRunIndex) + 1 : 0,
+    batchMaxRuns: state.batchMaxRuns,
+    batchIntervalMinutes: state.batchIntervalMinutes
   });
 });
 
@@ -106,6 +114,25 @@ chrome.runtime.onMessage.addListener((message, _sender, respond) => {
     });
   return true;
 });
+
+globalThis.FutbinSyncModuleControls = globalThis.FutbinSyncModuleControls || {};
+globalThis.FutbinSyncModuleControls.sbcPlayers = {
+  startWebAppBatch: async () => {
+    await API_CONFIG.ready;
+    const current = await getState();
+    if (current.running || current.nextRunAt) {
+      await stopSync("Web App Sync tamamlandı; mevcut SBC Players planı yeni batch ile değiştiriliyor.");
+    }
+    return startSync({
+      batchMode: true,
+      batchRunIndex: 1,
+      batchMaxRuns: 5,
+      batchIntervalMinutes: 10,
+      waitMs: API_CONFIG.number("WAIT_MS", 5000)
+    });
+  },
+  getSnapshot: async () => ({ ok: true, state: await getState() })
+};
 
 async function handleMessage(message) {
   await API_CONFIG.ready;
@@ -143,6 +170,14 @@ async function startSync(message = {}) {
   await chrome.alarms.clear(SCHEDULE_ALARM);
   const runToken = ++activeRunToken;
   const scheduleConfig = getScheduleConfig();
+  const batchActive = message.batchMode === true;
+  const batchMaxRuns = batchActive ? Math.max(1, Number(message.batchMaxRuns) || 5) : 0;
+  const batchRunIndex = batchActive
+    ? Math.min(batchMaxRuns, Math.max(1, Number(message.batchRunIndex) || 1))
+    : 0;
+  const batchIntervalMinutes = batchActive
+    ? Math.max(1, Number(message.batchIntervalMinutes) || 10)
+    : 0;
 
   const state = {
     ...emptyState,
@@ -151,6 +186,10 @@ async function startSync(message = {}) {
     waitMs: Math.min(30000, Math.max(1000, Number(message.waitMs) || 5000)),
     runToken,
     runCount: (Number(current.runCount) || 0) + 1,
+    batchActive,
+    batchRunIndex,
+    batchMaxRuns,
+    batchIntervalMinutes,
     startedAt: Date.now(),
     nextRunAt: null,
     scheduleTime: scheduleConfig.timeText,
@@ -182,7 +221,9 @@ async function startSync(message = {}) {
       status: result.processedSbcCount > 0 ? `${result.processedSbcCount} SBC kaydı işlendi; sync tamamlandı.` : "İşlenecek uygun SBC kaydı yok ya da endpoint senaryosu bekleniyor.",
       updatedAt: Date.now()
     };
-    completed = await scheduleNextRunAfterCompletion(completed, Number(result.processedSbcCount) > 0);
+    completed = batchActive
+      ? await scheduleNextBatchRun(completed)
+      : await scheduleNextRunAfterCompletion(completed, Number(result.processedSbcCount) > 0);
     await setState(completed);
     await resumePausedFutbinModulesOnce(runToken);
     return { ok: true, state: await getState() };
@@ -190,14 +231,16 @@ async function startSync(message = {}) {
     const wasActive = await isRunActive(runToken);
     if (wasActive) {
       const failedState = await getState();
-      await setState({
+      let failed = {
         ...failedState,
         running: false,
         status: error.message || String(error),
         error: error.message || String(error),
         completedAt: Date.now(),
         updatedAt: Date.now()
-      });
+      };
+      failed = batchActive ? await scheduleNextBatchRun(failed) : failed;
+      await setState(failed);
     }
     await resumePausedFutbinModulesOnce(runToken);
     if (!wasActive) {
@@ -607,6 +650,7 @@ async function stopSync(status = "Durduruldu.") {
   await setState({
     ...state,
     running: false,
+    batchActive: false,
     nextRunAt: null,
     status,
     completedAt: Date.now(),
@@ -703,7 +747,11 @@ async function scheduleStoredNextRun(state) {
     await startSync({
       apiBaseUrl: state.apiBaseUrl || API_CONFIG.defaultBaseUrl(),
       waitMs: state.waitMs || API_CONFIG.number("WAIT_MS", 5000),
-      scheduled: true
+      scheduled: true,
+      batchMode: state.batchActive === true,
+      batchRunIndex: state.batchActive ? Number(state.batchRunIndex) + 1 : 0,
+      batchMaxRuns: state.batchMaxRuns,
+      batchIntervalMinutes: state.batchIntervalMinutes
     });
     return;
   }
@@ -714,6 +762,47 @@ async function scheduleStoredNextRun(state) {
     scheduleTime: state.scheduleTime || null,
     checkIntervalMinutes: state.checkIntervalMinutes || null
   });
+}
+
+async function scheduleNextBatchRun(state) {
+  const runIndex = Math.max(1, Number(state.batchRunIndex) || 1);
+  const maxRuns = Math.max(1, Number(state.batchMaxRuns) || 5);
+  const intervalMinutes = Math.max(1, Number(state.batchIntervalMinutes) || 10);
+  await chrome.alarms.clear(SCHEDULE_ALARM);
+
+  if (runIndex >= maxRuns) {
+    const status = `${state.status} SBC Players batch ${maxRuns}/${maxRuns} tamamlandı; otomatik çalışma durduruldu.`;
+    await appendLog("SBC Players Web App sonrası batch tamamlandı.", {
+      completedRuns: runIndex,
+      maxRuns
+    });
+    return {
+      ...state,
+      running: false,
+      batchActive: false,
+      nextRunAt: null,
+      status,
+      updatedAt: Date.now()
+    };
+  }
+
+  const nextRunAt = Date.now() + intervalMinutes * 60 * 1000;
+  await chrome.alarms.create(SCHEDULE_ALARM, { when: nextRunAt });
+  await appendLog("SBC Players Web App sonrası sonraki batch turu planlandı.", {
+    completedRuns: runIndex,
+    nextRun: runIndex + 1,
+    maxRuns,
+    intervalMinutes,
+    nextRunAt: new Date(nextRunAt).toISOString()
+  });
+  return {
+    ...state,
+    running: false,
+    batchActive: true,
+    nextRunAt,
+    status: `${state.status} Batch ${runIndex}/${maxRuns}; ${intervalMinutes} dakika sonra ${runIndex + 1}. tur başlayacak.`,
+    updatedAt: Date.now()
+  };
 }
 
 async function scheduleNextRunAfterCompletion(state, hadNewData) {
@@ -835,8 +924,10 @@ function normalizeApiBaseUrl(value) {
 }
 
 async function apiRequest(apiBaseUrl, endpoint, options = {}, runToken = activeRunToken) {
+  await API_CONFIG.ready;
+  void apiBaseUrl;
   assertRunActive(runToken);
-  const url = new URL(endpoint, apiBaseUrl).href;
+  const url = new URL(endpoint, API_CONFIG.defaultBaseUrl()).href;
   const method = options.method || "GET";
   const headers = { "Content-Type": "application/json", ...(options.headers || {}) };
   let attempt = 1;

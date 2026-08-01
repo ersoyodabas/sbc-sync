@@ -101,7 +101,19 @@ globalThis.FutbinSyncModuleControls = globalThis.FutbinSyncModuleControls || {};
 globalThis.FutbinSyncModuleControls.important = {
   getSnapshot: async () => ({ ok: true, state: await getState() }),
   pauseForSbcPlayers,
-  resumeAfterSbcPlayers
+  resumeAfterSbcPlayers,
+  startAfterLatest: async () => {
+    await API_CONFIG.ready;
+    const state = await getState();
+    if (isFinishedState(state)) {
+      return { ok: true, skipped: true, reason: "user-stopped", state };
+    }
+    if (state.running || state.waitingForNextRun || state.nextRunAt) {
+      return { ok: true, skipped: true, reason: "already-active", state };
+    }
+    await appendLog("Latest Player Sync tamamlandı; Important Players otomatik başlatılıyor.");
+    return startSync(false, defaultApiBaseUrl());
+  }
 };
 
 async function handleMessage(message) {
@@ -111,11 +123,6 @@ async function handleMessage(message) {
   if (message?.type === "STOP_SYNC") return stopSync();
   if (message?.type === "PAUSE_FOR_SBC_PLAYERS") return pauseForSbcPlayers();
   if (message?.type === "RESUME_AFTER_SBC_PLAYERS") return resumeAfterSbcPlayers();
-  if (message?.type === "SET_API_BASE_URL") {
-    const apiBaseUrl = allowedApiBaseUrl(message.apiBaseUrl);
-    await patchState({ apiBaseUrl, status: `API ortamı: ${apiBaseUrl}` });
-    return { ok: true, apiBaseUrl };
-  }
   if (message?.type === "CLEAR_SYNC") {
     await stopSync();
     await setState({ ...initialState, apiBaseUrl: normalizeApi(message.apiBaseUrl || defaultApiBaseUrl()) });
@@ -594,7 +601,9 @@ async function failRun(token, error) {
 }
 async function ensureAlarm() { const state = await getState(); if (state.running && !isFinishedState(state) && state.nextRunAt > Date.now()) await chrome.alarms.create(ALARM, { when: state.nextRunAt }); }
 async function apiRequest(base, path, options = {}) {
-  const url = new URL(path, base).href;
+  await API_CONFIG.ready;
+  void base;
+  const url = new URL(path, API_CONFIG.defaultBaseUrl()).href;
   importantConsole("API request", {
     method: options.method || "GET",
     url,

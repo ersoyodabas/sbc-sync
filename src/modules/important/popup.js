@@ -4,8 +4,6 @@ const compactStyles = document.createElement("link");
 compactStyles.rel = "stylesheet";
 compactStyles.href = "compact.css";
 document.head.appendChild(compactStyles);
-const environments = [...document.querySelectorAll(".environment")];
-let selectedApiBaseUrl = "";
 let latestState = null;
 const statusElement = el("status");
 const statusRow = document.createElement("div");
@@ -17,32 +15,18 @@ el("start").classList.add("compact-action");
 el("start").innerHTML = `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m8 5 11 7-11 7z"/></svg><span>Başlat</span>`;
 el("network").classList.add("compact-action");
 el("network").innerHTML = `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20zm0 2c1.7 0 3.3 2.4 3.8 6H8.2C8.7 6.4 10.3 4 12 4zM4.3 10A8 8 0 0 1 7 5.4 16 16 0 0 0 6.2 10zm0 4h1.9c.2 1.8.5 3.3.9 4.6A8 8 0 0 1 4.3 14zm3.9 0h7.6c-.5 3.6-2.1 6-3.8 6s-3.3-2.4-3.8-6zm8.8 4.6c.4-1.3.7-2.8.9-4.6h1.9a8 8 0 0 1-2.8 4.6zM17.8 10c-.2-1.8-.5-3.3-.9-4.6a8 8 0 0 1 2.8 4.6z"/></svg>`;
-el("start").onclick = () => send("START_SYNC", { apiBaseUrl: selectedApiBaseUrl });
+el("start").onclick = () => send("START_SYNC");
 el("stop").onclick = () => send("STOP_SYNC");
-el("clear").onclick = () => send("CLEAR_SYNC", { apiBaseUrl: selectedApiBaseUrl });
+el("clear").onclick = () => send("CLEAR_SYNC");
 el("network").onclick = () => send("OPEN_NETWORK_MONITOR");
-environments.forEach((button) => button.onclick = async () => {
-  selectedApiBaseUrl = API_CONFIG.baseUrlFor(button.dataset.apiEnv);
-  setEnvironment(selectedApiBaseUrl);
-  await send("SET_API_BASE_URL", { apiBaseUrl: selectedApiBaseUrl });
-});
 chrome.runtime.onMessage.addListener((m) => { if (m.type === "STATE_CHANGED") render(m.state); });
 API_CONFIG.ready.then(() => {
-  selectedApiBaseUrl = API_CONFIG.defaultBaseUrl();
-  setEnvironment(selectedApiBaseUrl);
-});
+  API_CONFIG.defaultBaseUrl();
+}).catch((error) => alert(error.message));
 async function send(type, payload = {}) { const r = await chrome.runtime.sendMessage({ type, ...payload }); if (!r.ok) alert(r.error); render((await chrome.runtime.sendMessage({ type: "GET_SNAPSHOT" })).state); return r; }
-function setEnvironment(apiBaseUrl) {
-  selectedApiBaseUrl = API_CONFIG.allowedBaseUrl(apiBaseUrl || API_CONFIG.defaultBaseUrl());
-  environments.forEach((button) => {
-    const active = API_CONFIG.baseUrlFor(button.dataset.apiEnv) === selectedApiBaseUrl;
-    button.classList.toggle("active", active);
-    button.setAttribute("aria-pressed", String(active));
-  });
-}
 function render(s) {
   latestState = s;
-  setEnvironment(s.apiBaseUrl || selectedApiBaseUrl);
+  API_CONFIG.allowedBaseUrl();
   el("status").textContent = s.status || "Hazır"; el("dot").classList.toggle("running", !!s.running);
   el("status-loader").hidden = !s.running || !!s.waitingForNextRun;
   el("start").hidden = !!s.running; el("stop").hidden = !s.running;

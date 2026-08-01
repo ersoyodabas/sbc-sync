@@ -1,10 +1,8 @@
 (function (global) {
   let envCache = null;
   let readyPromise = null;
-  const API_BASE_URL = normalizeBaseUrl(
-    // "http://localhost:5055/api/"
-    "https://api.sbcmonster.com/api/"
-  );
+  let apiBaseUrl = "";
+  let configurationError = null;
   const DEFAULT_WAIT_MS = 5000;
 
   function parseEnv(text) {
@@ -50,11 +48,12 @@
     if (envCache) return envCache;
     const url = envUrl();
     if (!url) {
-      envCache = {};
-      return envCache;
+      throw new Error("Chrome extension .env kaynağı bulunamadı.");
     }
     const response = await fetch(`${url}?t=${Date.now()}`, { cache: "no-store" });
+    if (!response.ok) throw new Error(`.env yüklenemedi (HTTP ${response.status}).`);
     envCache = parseEnv(await response.text());
+    apiBaseUrl = requireApiBaseUrl(envCache.API_BASE_URL);
     return envCache;
   }
 
@@ -81,23 +80,42 @@
     }
   }
 
+  function requireApiBaseUrl(value) {
+    const normalized = normalizeBaseUrl(value);
+    if (!normalized) throw new Error("API_BASE_URL .env dosyasında tanımlı ve mutlak bir URL olmalıdır.");
+    const url = new URL(normalized);
+    if (url.protocol !== "http:" && url.protocol !== "https:") {
+      throw new Error("API_BASE_URL yalnız HTTP veya HTTPS kullanabilir.");
+    }
+    if (!url.pathname.endsWith("/api/")) {
+      throw new Error("API_BASE_URL /api/ ile bitmelidir.");
+    }
+    return url.href;
+  }
+
+  function configuredBaseUrl() {
+    if (configurationError) throw configurationError;
+    return apiBaseUrl;
+  }
+
   function baseUrlFor(environment) {
     void environment;
-    return API_BASE_URL;
+    return configuredBaseUrl();
   }
 
   function defaultBaseUrl() {
-    return API_BASE_URL;
+    return configuredBaseUrl();
   }
 
   function allowedBaseUrl(value) {
     void value;
-    return defaultBaseUrl();
+    return configuredBaseUrl();
   }
 
-  readyPromise = load().catch(() => {
-    envCache = envCache || {};
-    return envCache;
+  readyPromise = load().catch((error) => {
+    configurationError = error;
+    console.error("[CONFIG] API_BASE_URL yüklenemedi:", error);
+    throw error;
   });
 
   global.FutbinSyncApiConfig = Object.freeze({
@@ -110,7 +128,7 @@
     normalizeBaseUrl,
     allowedBaseUrl,
     defaultWaitMs: () => DEFAULT_WAIT_MS,
-    isLocal: () => false,
-    isProduction: () => false
+    isLocal: () => new URL(configuredBaseUrl()).hostname === "localhost",
+    isProduction: () => new URL(configuredBaseUrl()).hostname === "api.sbcmonster.com"
   });
 })(globalThis);
