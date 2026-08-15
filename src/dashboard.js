@@ -34,8 +34,7 @@ const modules = [
     progress(state) {
       return state.totalPages ? (num(state.currentPage) / num(state.totalPages)) * 100 : state.running ? 12 : 0;
     },
-    hasExtra: false,
-    extra: { label: "Network", title: "Network monitor", icon: "network" }
+    extra: { label: "Aç", title: "Aktif Futbin URL'yi aç", icon: "external" }
   },
   {
     id: "latest",
@@ -234,16 +233,27 @@ async function clearModule(module) {
 }
 
 async function extraAction(module) {
-  if (module.id === "important") {
+  const snapshot = latestSnapshots.get(module.id);
+  const state = module.snapshotState(snapshot);
+  if (state.awaitingFutbinVerification && state.futbinChallengeTabId) {
+    try {
+      const tab = await chrome.tabs.get(state.futbinChallengeTabId);
+      await chrome.tabs.update(tab.id, { active: true });
+      await chrome.windows.update(tab.windowId, { focused: true });
+      return;
+    } catch {
+      // Sekme kullanıcı tarafından kapatılmış olabilir; URL fallback'i kullanılacak.
+    }
+  }
+  if (state.awaitingFutbinVerification && state.futbinChallengeUrl) {
+    await chrome.tabs.create({ url: state.futbinChallengeUrl, active: true });
     return;
   }
   if (module.id === "latest") {
     await chrome.tabs.create({ url: "https://sbcmonster.com/coin-kartlari", active: true });
     return;
   }
-  const snapshot = latestSnapshots.get(module.id);
-  const state = module.snapshotState(snapshot);
-  const url = state.currentUrl || state.queue?.[state.currentJobIndex]?.url;
+  const url = state.futbinChallengeUrl || state.currentUrl || state.queue?.[state.currentJobIndex]?.url;
   if (url) await chrome.tabs.create({ url, active: true });
 }
 
@@ -269,7 +279,8 @@ function renderModule(module, response) {
   const errors = module.errors(response, state);
   panel.dataset.running = state.running ? "true" : "false";
 
-  panel.querySelector(".status-text").textContent = state.status || "Hazır";
+  const challengeUrl = state.awaitingFutbinVerification ? safeFutbinUrl(state.futbinChallengeUrl) : "";
+  panel.querySelector(".status-text").textContent = [state.status || "Hazır", challengeUrl].filter(Boolean).join(" · ");
   panel.querySelector(".progress-bar").style.width = `${clamp(module.progress(state), 0, 100)}%`;
   const metrics = [...module.metrics(state), ["TOPLAM SÜRE", elapsedDurationText(state)]];
   panel.querySelector(".metric-grid").innerHTML = metrics.map(([label, value]) => `

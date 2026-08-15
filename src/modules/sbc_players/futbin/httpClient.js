@@ -1,4 +1,5 @@
 import { futbinFailure, futbinSuccess } from "./response.js";
+import { FUTBIN_CHALLENGE_MAX_WAIT_MS, futbinChallengeTimeoutError, isFutbinChallengeHtml } from "../../futbin/challenge.js";
 
 export class FutbinHttpClient {
   constructor(config, logger = null) {
@@ -248,12 +249,14 @@ export class FutbinHttpClient {
   }
 
   async waitForReadableFutbinHtml(tabId, url, sendCancelSerial) {
-    const timeoutMs = Math.max(60000, Number(this.config.tabNavigationTimeoutMs) || 60000);
+    const targetDomTimeoutMs = Math.max(60000, Number(this.config.tabNavigationTimeoutMs) || 60000);
     const startedAt = Date.now();
+    let deadline = startedAt + targetDomTimeoutMs;
     let lastHtml = "";
     let lastError = null;
     let challengeLogged = false;
-    while (Date.now() - startedAt < timeoutMs) {
+    let challengeDetectedAt = null;
+    while (Date.now() < deadline) {
       if (sendCancelSerial !== this.cancelSerial) throw new Error("Futbin browser navigation cancelled");
       try {
         lastHtml = await this.readTabOuterHtml(tabId, url);
@@ -265,6 +268,7 @@ export class FutbinHttpClient {
       }
       const status = futbinHtmlReadiness(lastHtml);
       if (status.ready) {
+        if (challengeLogged) await this.notifyChallengeState({ resolved: true });
         this.logger?.info?.("Futbin hedef DOM okundu", {
           url,
           tabId,
@@ -275,19 +279,43 @@ export class FutbinHttpClient {
       }
       if (status.cloudflare && !challengeLogged) {
         challengeLogged = true;
-        this.logger?.info?.("Futbin Cloudflare doğrulaması algılandı; hedef HTML bekleniyor.", {
+        challengeDetectedAt = Date.now();
+        deadline = challengeDetectedAt + FUTBIN_CHALLENGE_MAX_WAIT_MS;
+        await this.focusChallengeTab(tabId);
+        await this.notifyChallengeState({ waiting: true, tabId, url, detectedAt: challengeDetectedAt });
+        this.logger?.info?.(`Futbin Cloudflare doğrulaması algılandı; açık sekmede doğrulama bekleniyor · ${url}`, {
           url,
           tabId,
-          maxWaitMs: timeoutMs
+          maxWaitMs: FUTBIN_CHALLENGE_MAX_WAIT_MS
         });
       }
       await delay(250);
     }
     const status = futbinHtmlReadiness(lastHtml);
+    if (challengeLogged) await this.notifyChallengeState({ waiting: false });
     if (lastError && !lastHtml) throw lastError;
     throw new Error(status.cloudflare
-      ? `Futbin Cloudflare doğrulaması ${Math.round(timeoutMs / 1000)} saniye içinde tamamlanmadı: ${url}`
-      : `Futbin hedef HTML ${Math.round(timeoutMs / 1000)} saniye içinde okunamadı: ${url}`);
+      ? futbinChallengeTimeoutError(url)
+      : `Futbin hedef HTML ${Math.round(targetDomTimeoutMs / 1000)} saniye içinde okunamadı: ${url}`);
+  }
+
+  async focusChallengeTab(tabId) {
+    try {
+      const tab = await chrome.tabs.get(tabId);
+      await chrome.tabs.update(tabId, { active: true });
+      if (Number.isInteger(tab.windowId)) await chrome.windows.update(tab.windowId, { focused: true });
+    } catch (error) {
+      this.logger?.warning?.("Futbin doğrulama sekmesi öne getirilemedi", { tabId, error: error.message || String(error) });
+    }
+  }
+
+  async notifyChallengeState(details) {
+    if (typeof this.config.onChallengeStateChange !== "function") return;
+    try {
+      await this.config.onChallengeStateChange(details);
+    } catch (error) {
+      this.logger?.warning?.("Futbin doğrulama durumu güncellenemedi", { error: error.message || String(error) });
+    }
   }
 
   buildUrl(endpoint, queryParameters = {}) {
@@ -343,8 +371,7 @@ export class FutbinHttpClient {
 
 function futbinHtmlReadiness(html) {
   const text = String(html || "");
-  const normalized = text.toLowerCase();
-  const cloudflare = /cloudflare|ray id|güvenlik doğrulaması|guvenlik dogrulamasi|checking your browser|verifying you are human|kötü niyetli bot|kotü niyetli bot|malicious bots|security service/.test(normalized);
+  const cloudflare = isFutbinChallengeHtml(text);
   const targetDomReady = /table[^>]+class=["'][^"']*players-table|tr[^>]+class=["'][^"']*player-row|class=["'][^"']*table-player-name|class=["'][^"']*challenges-wrapper|href=["'][^"']*(squad-building-challenge|squad-building-challenges|\/squad\/)[^"']*["']|playerName|resourceId|lineup|starters|formation|completed challenges/i.test(text);
   return {
     cloudflare,

@@ -1,10 +1,12 @@
+import { FUTBIN_CHALLENGE_MAX_WAIT_MS, futbinChallengeTimeoutError, isFutbinChallengeHtml } from "../futbin/challenge.js";
+
 const STATE_KEY = "filteredPlayersSyncState";
 const ALARM = "filtered-players-hourly";
 const SOURCE_URL = "https://www.futbin.com/26/players?ps_price=300-45000&player_rating=82-95&sort=Player_Rating&order=asc&eUnt=1";
 const API_CONFIG = globalThis.FutbinSyncApiConfig;
 const PAGE_BATCH_SIZE = 5;
 const REQUEST_DELAY_MS = 5000;
-const FUTBIN_CHALLENGE_MAX_WAIT_MS = 60000;
+const FUTBIN_TARGET_DOM_MAX_WAIT_MS = 60000;
 const LOOP_DELAY_MS = 60 * 60 * 1000;
 const SINGLE_PAGE_DEBUG_MODE = false;
 let activeController = null;
@@ -26,7 +28,11 @@ const initialState = {
   pagesSucceeded: 0, parsedPlayers: 0, mappedPlayers: 0, skippedPlayers: 0,
   savedPlayers: 0, insertedPlayers: 0, updatedPlayers: 0, errors: [], nextRunAt: null,
   startedAt: null, completedAt: null, updatedAt: null, logs: [], roundNumber: 0,
-  waitingForNextRun: false
+  waitingForNextRun: false,
+  awaitingFutbinVerification: false,
+  futbinChallengeDetectedAt: null,
+  futbinChallengeTabId: null,
+  futbinChallengeUrl: null
 };
 
 chrome.runtime.onInstalled.addListener(async () => {
@@ -365,14 +371,16 @@ async function fetchViaTab(url, token) {
 
 async function waitForFutbinTabHtml(tabId, url, token) {
   const startedAt = Date.now();
+  let deadline = startedAt + FUTBIN_TARGET_DOM_MAX_WAIT_MS;
   let challengeLogged = false;
+  let challengeDetectedAt = null;
   let lastHtml = "";
   let lastError = null;
   let cancelled = false;
   cancelActiveTabWait = () => {
     cancelled = true;
   };
-  while (Date.now() - startedAt < FUTBIN_CHALLENGE_MAX_WAIT_MS) {
+  while (Date.now() < deadline) {
     if (cancelled) throw new DOMException("Sync finished", "AbortError");
     assertActive(token);
     try {
@@ -385,26 +393,55 @@ async function waitForFutbinTabHtml(tabId, url, token) {
     }
     const status = futbinHtmlReadiness(lastHtml);
     if (status.ready) {
+      if (challengeLogged) await setFutbinVerificationState(token, { resolved: true });
       await appendLog(`Futbin hedef DOM hazır · ${String(lastHtml || "").length} karakter`);
       return lastHtml;
     }
     if (status.cloudflare && !challengeLogged) {
       challengeLogged = true;
+      challengeDetectedAt = Date.now();
+      deadline = challengeDetectedAt + FUTBIN_CHALLENGE_MAX_WAIT_MS;
+      await focusFutbinChallengeTab(tabId);
+      await setFutbinVerificationState(token, { waiting: true, tabId, url, detectedAt: challengeDetectedAt });
       importantConsole("Futbin Cloudflare doğrulaması algılandı; hedef HTML bekleniyor", {
         url,
         tabId,
         maxWaitMs: FUTBIN_CHALLENGE_MAX_WAIT_MS
       });
-      await appendLog("Futbin Cloudflare doğrulaması algılandı; hedef HTML bekleniyor");
+      await appendLog(`Futbin Cloudflare doğrulaması algılandı; açık sekmede doğrulama bekleniyor · ${url}`);
     }
     await delay(250);
   }
   cancelActiveTabWait = null;
   const status = futbinHtmlReadiness(lastHtml);
+  if (challengeLogged) await setFutbinVerificationState(token, { waiting: false });
   if (lastError && !lastHtml) throw lastError;
   throw new Error(status.cloudflare
-    ? `Futbin Cloudflare doğrulaması 60 saniye içinde tamamlanmadı: ${url}`
+    ? futbinChallengeTimeoutError(url)
     : `Futbin hedef HTML 60 saniye içinde okunamadı: ${url}`);
+}
+
+async function focusFutbinChallengeTab(tabId) {
+  try {
+    const tab = await chrome.tabs.get(tabId);
+    await chrome.tabs.update(tabId, { active: true });
+    if (Number.isInteger(tab.windowId)) await chrome.windows.update(tab.windowId, { focused: true });
+  } catch (error) {
+    importantConsole("Futbin doğrulama sekmesi öne getirilemedi", { tabId, error: error.message || String(error) });
+  }
+}
+
+async function setFutbinVerificationState(token, { waiting = false, tabId = null, url = null, detectedAt = null, resolved = false } = {}) {
+  if (!await isActiveRun(token)) return;
+  const patch = {
+    awaitingFutbinVerification: waiting,
+    futbinChallengeDetectedAt: waiting ? detectedAt : null,
+    futbinChallengeTabId: waiting ? tabId : null,
+    futbinChallengeUrl: waiting ? url : null
+  };
+  if (waiting) patch.status = "Futbin doğrulaması bekleniyor — açık sekmede devam edin";
+  if (resolved) patch.status = "Futbin doğrulaması tamamlandı; işleme devam ediliyor";
+  await patchState(patch);
 }
 
 async function readTabOuterHtml(tabId) {
@@ -417,8 +454,7 @@ async function readTabOuterHtml(tabId) {
 
 function futbinHtmlReadiness(html) {
   const text = String(html || "");
-  const normalized = text.toLowerCase();
-  const cloudflare = /cloudflare|ray id|güvenlik doğrulaması|guvenlik dogrulamasi|checking your browser|verifying you are human|kötü niyetli bot|kotu niyetli bot|malicious bots|security service/.test(normalized);
+  const cloudflare = isFutbinChallengeHtml(text);
   const targetDomReady = /table[^>]+class=["'][^"']*players-table|tr[^>]+class=["'][^"']*player-row|class=["'][^"']*table-player-name|class=["'][^"']*selected-filters-wrapper|class=["'][^"']*pagination-buttons-wrapper/i.test(text);
   return {
     cloudflare,
@@ -525,7 +561,16 @@ async function isActiveRun(token) { const state = await getState(); return token
 function isFinishedState(state) { return !state?.running && state?.status === FINISHED_STATUS; }
 async function stopSync() {
   await cancelActiveWork("Sync finished");
-  await patchState({ running: false, waitingForNextRun: false, status: FINISHED_STATUS, nextRunAt: null });
+  await patchState({
+    running: false,
+    waitingForNextRun: false,
+    awaitingFutbinVerification: false,
+    futbinChallengeDetectedAt: null,
+    futbinChallengeTabId: null,
+    futbinChallengeUrl: null,
+    status: FINISHED_STATUS,
+    nextRunAt: null
+  });
   return { ok: true };
 }
 
@@ -543,6 +588,10 @@ async function pauseForSbcPlayers() {
   const next = await patchState({
     running: false,
     waitingForNextRun: false,
+    awaitingFutbinVerification: false,
+    futbinChallengeDetectedAt: null,
+    futbinChallengeTabId: null,
+    futbinChallengeUrl: null,
     nextRunAt: null,
     currentPage: 0,
     status: SBC_PLAYERS_PAUSED_STATUS,

@@ -1,3 +1,5 @@
+import { FUTBIN_CHALLENGE_MAX_WAIT_MS, futbinChallengeTimeoutError, isFutbinChallengeHtml } from "../futbin/challenge.js";
+
 const STATE_KEY = "latestSyncState";
 const RECORDS_KEY = "latestPlayerRecords";
 const LOGS_KEY = "latestSyncLogs";
@@ -7,7 +9,7 @@ const PAGE_TIMEOUT_ALARM = "latest-futbin-sync-page-timeout";
 const JOB_ADVANCE_ALARM = "latest-futbin-sync-job-advance";
 const SYNC_LOOP_ALARM = "latest-futbin-sync-loop";
 const SYNC_LOOP_DELAY_MS = 60 * 60 * 1000;
-const FUTBIN_CHALLENGE_MAX_WAIT_MS = 60000;
+const FUTBIN_TARGET_DOM_MAX_WAIT_MS = 60000;
 let ENV = null;
 async function getEnv() {
   if (ENV) return ENV;
@@ -96,6 +98,10 @@ const emptyState = {
   runStartedAt: null,
   status: "Hazır",
   error: null,
+  awaitingFutbinVerification: false,
+  futbinChallengeDetectedAt: null,
+  futbinChallengeTabId: null,
+  futbinChallengeUrl: null,
   updatedAt: null
 };
 
@@ -545,6 +551,10 @@ async function pauseSync(rawOperations = null) {
       latestCoinCardJobsSnapshotLoaded: false,
       newlyInsertedCoinCardIds: [],
       latestUpdatedCoinCardIds: [],
+      awaitingFutbinVerification: false,
+      futbinChallengeDetectedAt: null,
+      futbinChallengeTabId: null,
+      futbinChallengeUrl: null,
       nextRunAt: null,
       status: FINISHED_STATUS,
       error: null,
@@ -584,6 +594,10 @@ async function pauseForSbcPlayers() {
     ...state,
     running: false,
     tabId: null,
+    awaitingFutbinVerification: false,
+    futbinChallengeDetectedAt: null,
+    futbinChallengeTabId: null,
+    futbinChallengeUrl: null,
     nextRunAt: null,
     currentUrl: null,
     status: SBC_PLAYERS_PAUSED_STATUS,
@@ -2162,10 +2176,12 @@ function isCurrentPageSender(state, message, sender) {
 async function waitForFutbinTargetHtml(tabId, url, state) {
   if (!isFutbinUrl(url)) return;
   const startedAt = Date.now();
+  let deadline = startedAt + FUTBIN_TARGET_DOM_MAX_WAIT_MS;
   let challengeLogged = false;
+  let challengeDetectedAt = null;
   let lastHtml = "";
   let lastError = null;
-  while (Date.now() - startedAt < FUTBIN_CHALLENGE_MAX_WAIT_MS) {
+  while (Date.now() < deadline) {
     const latestState = await getStateByTabId(tabId);
     if (!latestState.running || latestState.tabId !== tabId) throw new Error("Futbin sekme beklemesi durduruldu.");
     try {
@@ -2178,6 +2194,7 @@ async function waitForFutbinTargetHtml(tabId, url, state) {
     }
     const status = futbinHtmlReadiness(lastHtml, currentJob(state));
     if (status.ready) {
+      if (challengeLogged) await setLatestFutbinVerificationState(state, { resolved: true });
       await appendLatestTabLog(state, "Futbin hedef DOM bulundu; sayfa okunacak", "tab-target-dom-found", {
         tabId,
         url,
@@ -2188,13 +2205,17 @@ async function waitForFutbinTargetHtml(tabId, url, state) {
     }
     if (status.cloudflare && !challengeLogged) {
       challengeLogged = true;
+      challengeDetectedAt = Date.now();
+      deadline = challengeDetectedAt + FUTBIN_CHALLENGE_MAX_WAIT_MS;
+      await focusLatestFutbinChallengeTab(tabId);
+      await setLatestFutbinVerificationState(state, { waiting: true, tabId, url, detectedAt: challengeDetectedAt });
       syncLog("Futbin Cloudflare doğrulaması algılandı; hedef HTML bekleniyor", {
         ...stateLogDetails(state),
         url,
         tabId,
         maxWaitMs: FUTBIN_CHALLENGE_MAX_WAIT_MS
       });
-      await appendLatestTabLog(state, "Futbin Cloudflare doğrulaması algılandı; hedef HTML bekleniyor", "tab-cloudflare-wait", {
+      await appendLatestTabLog(state, `Futbin Cloudflare doğrulaması algılandı; açık sekmede doğrulama bekleniyor · ${url}`, "tab-cloudflare-wait", {
         tabId,
         url,
         maxWaitMs: FUTBIN_CHALLENGE_MAX_WAIT_MS
@@ -2203,10 +2224,35 @@ async function waitForFutbinTargetHtml(tabId, url, state) {
     await delay(250);
   }
   const status = futbinHtmlReadiness(lastHtml, currentJob(state));
+  if (challengeLogged) await setLatestFutbinVerificationState(state, { waiting: false });
   if (lastError && !lastHtml) throw lastError;
   throw new Error(status.cloudflare
-    ? `Futbin Cloudflare doğrulaması 60 saniye içinde tamamlanmadı: ${url}`
+    ? futbinChallengeTimeoutError(url)
     : `Futbin hedef HTML 60 saniye içinde okunamadı: ${url}`);
+}
+
+async function focusLatestFutbinChallengeTab(tabId) {
+  try {
+    await activateRunnerTab(tabId);
+  } catch (error) {
+    syncLog("Futbin doğrulama sekmesi öne getirilemedi", { tabId, error: error.message || String(error) });
+  }
+}
+
+async function setLatestFutbinVerificationState(state, { waiting = false, tabId = null, url = null, detectedAt = null, resolved = false } = {}) {
+  const liveState = await getState(state?.runnerId);
+  if (!liveState.running || liveState.tabId !== state?.tabId || !sameRun(state, liveState)) return;
+  const updated = {
+    ...liveState,
+    awaitingFutbinVerification: waiting,
+    futbinChallengeDetectedAt: waiting ? detectedAt : null,
+    futbinChallengeTabId: waiting ? tabId : null,
+    futbinChallengeUrl: waiting ? url : null,
+    updatedAt: Date.now()
+  };
+  if (waiting) updated.status = jobStatus(currentJob(liveState), liveState.currentJobIndex, liveState.queue.length, "Futbin doğrulaması bekleniyor — açık sekmede devam edin");
+  if (resolved) updated.status = jobStatus(currentJob(liveState), liveState.currentJobIndex, liveState.queue.length, "Futbin doğrulaması tamamlandı; işleme devam ediliyor");
+  await setState(updated);
 }
 
 async function readTabOuterHtml(tabId) {
@@ -2219,8 +2265,7 @@ async function readTabOuterHtml(tabId) {
 
 function futbinHtmlReadiness(html, job = {}) {
   const text = String(html || "");
-  const normalized = text.toLowerCase();
-  const cloudflare = /cloudflare|ray id|güvenlik doğrulaması|guvenlik dogrulamasi|checking your browser|verifying you are human|kötü niyetli bot|kotu niyetli bot|malicious bots|security service/.test(normalized);
+  const cloudflare = isFutbinChallengeHtml(text);
   const targetDomReady = latestTargetDomReady(text, job);
   return {
     cloudflare,

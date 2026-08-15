@@ -16,7 +16,7 @@ const futbinLogger = createFutbinLogger("SbcPlayersFutbin", (level, message, det
   ...(details && typeof details === "object" ? details : { details })
 }));
 const futbinSbcService = createFutbinSbcService({
-  config: createFutbinConfig(),
+  config: createFutbinConfig({ onChallengeStateChange: updateFutbinChallengeState }),
   logger: futbinLogger
 });
 let activeRunToken = 0;
@@ -56,7 +56,11 @@ const emptyState = {
   completedAt: null,
   updatedAt: null,
   pausedFutbinModules: [],
-  futbinModulesResumeCompleted: false
+  futbinModulesResumeCompleted: false,
+  awaitingFutbinVerification: false,
+  futbinChallengeDetectedAt: null,
+  futbinChallengeTabId: null,
+  futbinChallengeUrl: null
 };
 
 chrome.runtime.onInstalled.addListener(async () => {
@@ -652,6 +656,10 @@ async function stopSync(status = "Durduruldu.") {
     running: false,
     batchActive: false,
     nextRunAt: null,
+    awaitingFutbinVerification: false,
+    futbinChallengeDetectedAt: null,
+    futbinChallengeTabId: null,
+    futbinChallengeUrl: null,
     status,
     completedAt: Date.now(),
     updatedAt: Date.now()
@@ -659,6 +667,22 @@ async function stopSync(status = "Durduruldu.") {
   await appendLog(status);
   await resumePausedFutbinModulesOnce();
   return { ok: true, state: await getState() };
+}
+
+async function updateFutbinChallengeState({ waiting = false, tabId = null, url = null, detectedAt = null, resolved = false } = {}) {
+  const state = await getState();
+  if (!state.running) return;
+  const updated = {
+    ...state,
+    awaitingFutbinVerification: waiting,
+    futbinChallengeDetectedAt: waiting ? detectedAt : null,
+    futbinChallengeTabId: waiting ? tabId : null,
+    futbinChallengeUrl: waiting ? url : null,
+    updatedAt: Date.now()
+  };
+  if (waiting) updated.status = "Futbin doğrulaması bekleniyor — açık sekmede devam edin";
+  if (resolved) updated.status = "Futbin doğrulaması tamamlandı; işleme devam ediliyor";
+  await setState(updated);
 }
 
 async function cancelActiveRun(status = "Durduruldu.") {

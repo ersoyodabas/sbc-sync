@@ -1,3 +1,5 @@
+import { FUTBIN_CHALLENGE_MAX_WAIT_MS, futbinChallengeTimeoutError, isFutbinChallengeHtml } from "../futbin/challenge.js";
+
 const STATE_KEY = "webAppSyncState";
 const RECORDS_KEY = "webAppPlayerRecords";
 const LOGS_KEY = "webAppSyncLogs";
@@ -18,7 +20,7 @@ const DAILY_LOG_DISPLAY_LIMIT = 3;
 const WEB_APP_MESSAGE_RETRY_COUNT = 120;
 const WEB_APP_MESSAGE_RETRY_DELAY_MS = 250;
 const WEB_APP_LOGIN_REDIRECT_GRACE_MS = 150000;
-const FUTBIN_CHALLENGE_MAX_WAIT_MS = 60000;
+const FUTBIN_TARGET_DOM_MAX_WAIT_MS = 60000;
 let ENV = null;
 async function getEnv() {
   ENV = {};
@@ -86,6 +88,10 @@ const emptyState = {
   runStartedAt: null,
   status: "Hazır",
   error: null,
+  awaitingFutbinVerification: false,
+  futbinChallengeDetectedAt: null,
+  futbinChallengeTabId: null,
+  futbinChallengeUrl: null,
   updatedAt: null
 };
 
@@ -490,6 +496,10 @@ async function pauseSync(rawOperations = null) {
       currentPlayers: {},
       currentLatest: null,
       newlyInsertedCoinCardIds: [],
+      awaitingFutbinVerification: false,
+      futbinChallengeDetectedAt: null,
+      futbinChallengeTabId: null,
+      futbinChallengeUrl: null,
       nextRunAt: null,
       status: FINISHED_STATUS,
       error: null,
@@ -2316,10 +2326,12 @@ function isCurrentPageSender(state, message, sender) {
 async function waitForFutbinTargetHtml(tabId, url, state) {
   if (!isFutbinUrl(url)) return;
   const startedAt = Date.now();
+  let deadline = startedAt + FUTBIN_TARGET_DOM_MAX_WAIT_MS;
   let challengeLogged = false;
+  let challengeDetectedAt = null;
   let lastHtml = "";
   let lastError = null;
-  while (Date.now() - startedAt < FUTBIN_CHALLENGE_MAX_WAIT_MS) {
+  while (Date.now() < deadline) {
     const latestState = await getStateByTabId(tabId);
     if (!latestState.running || latestState.tabId !== tabId) throw new Error("Futbin sekme beklemesi durduruldu.");
     try {
@@ -2331,9 +2343,16 @@ async function waitForFutbinTargetHtml(tabId, url, state) {
       continue;
     }
     const status = futbinHtmlReadiness(lastHtml);
-    if (status.ready) return;
+    if (status.ready) {
+      if (challengeLogged) await setWebAppFutbinVerificationState(state, { resolved: true });
+      return;
+    }
     if (status.cloudflare && !challengeLogged) {
       challengeLogged = true;
+      challengeDetectedAt = Date.now();
+      deadline = challengeDetectedAt + FUTBIN_CHALLENGE_MAX_WAIT_MS;
+      await focusWebAppFutbinChallengeTab(tabId);
+      await setWebAppFutbinVerificationState(state, { waiting: true, tabId, url, detectedAt: challengeDetectedAt });
       console.info("[WebAppSync] Futbin Cloudflare doğrulaması algılandı; hedef HTML bekleniyor", {
         runnerId: state?.runnerId || null,
         currentJobIndex: state?.currentJobIndex ?? null,
@@ -2343,7 +2362,7 @@ async function waitForFutbinTargetHtml(tabId, url, state) {
         tabId,
         maxWaitMs: FUTBIN_CHALLENGE_MAX_WAIT_MS
       });
-      await appendWebAppBackgroundLog(state, "TAB", "Futbin Cloudflare doğrulaması algılandı; hedef HTML bekleniyor", {
+      await appendWebAppBackgroundLog(state, "TAB", `Futbin Cloudflare doğrulaması algılandı; açık sekmede doğrulama bekleniyor · ${url}`, {
         tabId,
         url,
         maxWaitMs: FUTBIN_CHALLENGE_MAX_WAIT_MS
@@ -2352,10 +2371,35 @@ async function waitForFutbinTargetHtml(tabId, url, state) {
     await delay(1000);
   }
   const status = futbinHtmlReadiness(lastHtml);
+  if (challengeLogged) await setWebAppFutbinVerificationState(state, { waiting: false });
   if (lastError && !lastHtml) throw lastError;
   throw new Error(status.cloudflare
-    ? `Futbin Cloudflare doğrulaması 60 saniye içinde tamamlanmadı: ${url}`
+    ? futbinChallengeTimeoutError(url)
     : `Futbin hedef HTML 60 saniye içinde okunamadı: ${url}`);
+}
+
+async function focusWebAppFutbinChallengeTab(tabId) {
+  try {
+    await activateRunnerTab(tabId);
+  } catch (error) {
+    console.warn("[WebAppSync] Futbin doğrulama sekmesi öne getirilemedi", { tabId, error: error.message || String(error) });
+  }
+}
+
+async function setWebAppFutbinVerificationState(state, { waiting = false, tabId = null, url = null, detectedAt = null, resolved = false } = {}) {
+  const liveState = await getState(state?.runnerId);
+  if (!liveState.running || liveState.tabId !== state?.tabId || !sameRun(state, liveState)) return;
+  const updated = {
+    ...liveState,
+    awaitingFutbinVerification: waiting,
+    futbinChallengeDetectedAt: waiting ? detectedAt : null,
+    futbinChallengeTabId: waiting ? tabId : null,
+    futbinChallengeUrl: waiting ? url : null,
+    updatedAt: Date.now()
+  };
+  if (waiting) updated.status = jobStatus(currentJob(liveState), liveState.currentJobIndex, liveState.queue.length, "Futbin doğrulaması bekleniyor — açık sekmede devam edin");
+  if (resolved) updated.status = jobStatus(currentJob(liveState), liveState.currentJobIndex, liveState.queue.length, "Futbin doğrulaması tamamlandı; işleme devam ediliyor");
+  await setState(updated);
 }
 
 async function readTabOuterHtml(tabId) {
@@ -2368,8 +2412,7 @@ async function readTabOuterHtml(tabId) {
 
 function futbinHtmlReadiness(html) {
   const text = String(html || "");
-  const normalized = text.toLowerCase();
-  const cloudflare = /cloudflare|ray id|güvenlik doğrulaması|guvenlik dogrulamasi|checking your browser|verifying you are human|kötü niyetli bot|kotu niyetli bot|malicious bots|security service/.test(normalized);
+  const cloudflare = isFutbinChallengeHtml(text);
   const targetDomReady = /class=["'][^"']*(players-table|challenges-wrapper|squad-builder|sbc|player)[^"']*["']|href=["'][^"']*(\/player\/|squad-building-challenge|squad-building-challenges|\/squad\/)[^"']*["']|playerName|resourceId|lineup|starters|formation|completed challenges/i.test(text);
   return {
     cloudflare,
