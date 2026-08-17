@@ -20,7 +20,7 @@ let cancelActiveTabWait = null;
 const activeRequestControllers = new Set();
 const pendingDelayResolvers = new Map();
 const FINISHED_STATUS = "Finished";
-const SBC_PLAYERS_PAUSED_STATUS = "SBC Players için geçici duraklatıldı.";
+const FC_SYNC_ENABLED_KEY = "fcSyncEnabled";
 
 const initialState = {
   runnerId: "filtered-players", running: false, status: "Hazır", sourceUrl: SOURCE_URL,
@@ -37,15 +37,16 @@ const initialState = {
 
 chrome.runtime.onInstalled.addListener(async () => {
   const saved = (await chrome.storage.local.get(STATE_KEY))[STATE_KEY];
-  if (!saved) await setState(initialState);
-  else if (isFinishedState(saved)) {
-    await chrome.alarms.clear(ALARM);
-    await setState({ ...saved, running: false, waitingForNextRun: false, nextRunAt: null, status: FINISHED_STATUS });
-  } else {
-    await setState({ ...saved, apiBaseUrl: defaultApiBaseUrl(), running: false, status: "API ortamı .env'den seçildi; tur yeniden başlatılıyor" });
-  }
+  await chrome.alarms.clear(ALARM);
+  await setState({ ...(saved || initialState), apiBaseUrl: defaultApiBaseUrl(), running: false, waitingForNextRun: false, nextRunAt: null, status: "Hazır - merkezi başlatma bekleniyor" });
 });
 chrome.runtime.onStartup.addListener(async () => {
+  if (!await isFcSyncEnabled()) {
+    await chrome.alarms.clear(ALARM);
+    const state = await getState();
+    await setState({ ...state, running: false, waitingForNextRun: false, nextRunAt: null, status: "Hazır - merkezi başlatma bekleniyor" });
+    return;
+  }
   const state = await getState();
   if (isFinishedState(state)) {
     await chrome.alarms.clear(ALARM);
@@ -106,14 +107,12 @@ chrome.runtime.onConnect.addListener((port) => {
 globalThis.FutbinSyncModuleControls = globalThis.FutbinSyncModuleControls || {};
 globalThis.FutbinSyncModuleControls.important = {
   getSnapshot: async () => ({ ok: true, state: await getState() }),
-  pauseForSbcPlayers,
-  resumeAfterSbcPlayers,
+  start: async ({ apiBaseUrl } = {}) => startSync(false, apiBaseUrl || defaultApiBaseUrl()),
+  stop: stopSync,
   startAfterLatest: async () => {
     await API_CONFIG.ready;
+    if (!await isFcSyncEnabled()) return { ok: true, skipped: true, reason: "central-sync-stopped", state: await getState() };
     const state = await getState();
-    if (isFinishedState(state)) {
-      return { ok: true, skipped: true, reason: "user-stopped", state };
-    }
     if (state.running || state.waitingForNextRun || state.nextRunAt) {
       return { ok: true, skipped: true, reason: "already-active", state };
     }
@@ -127,8 +126,6 @@ async function handleMessage(message) {
   if (message?.type === "GET_SNAPSHOT") return { ok: true, state: await getState() };
   if (message?.type === "START_SYNC") return startSync(false, message.apiBaseUrl);
   if (message?.type === "STOP_SYNC") return stopSync();
-  if (message?.type === "PAUSE_FOR_SBC_PLAYERS") return pauseForSbcPlayers();
-  if (message?.type === "RESUME_AFTER_SBC_PLAYERS") return resumeAfterSbcPlayers();
   if (message?.type === "CLEAR_SYNC") {
     await stopSync();
     await setState({ ...initialState, apiBaseUrl: normalizeApi(message.apiBaseUrl || defaultApiBaseUrl()) });
@@ -559,6 +556,7 @@ function preferPlayer(old, next) { if (!old) return next; return (next.price_con
 function assertActive(token) { if (token !== runToken) throw new DOMException("Sync finished", "AbortError"); }
 async function isActiveRun(token) { const state = await getState(); return token === runToken && state.running && !isFinishedState(state); }
 function isFinishedState(state) { return !state?.running && state?.status === FINISHED_STATUS; }
+async function isFcSyncEnabled() { return Boolean((await chrome.storage.local.get(FC_SYNC_ENABLED_KEY))[FC_SYNC_ENABLED_KEY]); }
 async function stopSync() {
   await cancelActiveWork("Sync finished");
   await patchState({
@@ -572,46 +570,6 @@ async function stopSync() {
     nextRunAt: null
   });
   return { ok: true };
-}
-
-async function pauseForSbcPlayers() {
-  const state = await getState();
-  if (!state.running || state.waitingForNextRun || isFinishedState(state)) {
-    return { ok: true, paused: false, state };
-  }
-  const pausedBySbcPlayers = {
-    apiBaseUrl: state.apiBaseUrl || defaultApiBaseUrl(),
-    roundNumber: Number(state.roundNumber) || 0,
-    pausedAt: Date.now()
-  };
-  await cancelActiveWork(SBC_PLAYERS_PAUSED_STATUS);
-  const next = await patchState({
-    running: false,
-    waitingForNextRun: false,
-    awaitingFutbinVerification: false,
-    futbinChallengeDetectedAt: null,
-    futbinChallengeTabId: null,
-    futbinChallengeUrl: null,
-    nextRunAt: null,
-    currentPage: 0,
-    status: SBC_PLAYERS_PAUSED_STATUS,
-    pausedBySbcPlayers,
-    logs: [...(state.logs || []), logEntry("SBC Players çalışması için Important Players geçici duraklatıldı.")].slice(-500)
-  });
-  return { ok: true, paused: true, state: next };
-}
-
-async function resumeAfterSbcPlayers() {
-  const state = await getState();
-  const paused = state.pausedBySbcPlayers;
-  if (!paused) return { ok: true, resumed: false, state };
-  if (state.running && !state.waitingForNextRun) return { ok: true, resumed: false, alreadyRunning: true, state };
-  await patchState({
-    pausedBySbcPlayers: null,
-    status: "SBC Players tamamlandı; Important Players yeniden başlatılıyor",
-    logs: [...(state.logs || []), logEntry("SBC Players tamamlandı; Important Players yeniden başlatılıyor.")].slice(-500)
-  });
-  return startSync(false, paused.apiBaseUrl || state.apiBaseUrl || defaultApiBaseUrl());
 }
 
 async function cancelActiveWork(reason = "Sync finished") {

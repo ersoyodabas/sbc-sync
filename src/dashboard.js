@@ -65,87 +65,15 @@ const modules = [
     progress: queueProgress,
     extra: { label: "Aç", title: "Aktif URL'yi aç", icon: "external" }
   },
-  {
-    id: "sbc_players",
-    title: "SBC Players",
-    color: "#f6c85f",
-    icon: "card",
-    operations: ["sbc-players"],
-    stateKey: "sbcPlayersSyncState",
-    logsKey: "sbcPlayersSyncLogs",
-    errorsKey: "sbcPlayersSyncErrors",
-    snapshotState(response) {
-      return response?.sbcPlayersSyncState || {};
-    },
-    logs(response, state) {
-      const storedLogs = response?.sbcPlayersSyncLogs || [];
-      return storedLogs.length ? storedLogs : state?.logs || [];
-    },
-    errors(response) {
-      return response?.sbcPlayersSyncErrors || [];
-    },
-    metrics(state) {
-      return [
-        ["Eksik SBC", num(state.missingSbcCount)],
-        ["İşlenen", num(state.processedSbcCount)],
-        ["Bulunan", num(state.matchedPlayerCount)],
-        ["Saved", num(state.savedPlayerCount)],
-        ["Skipped", num(state.skippedPlayerCount)],
-        ["Run", num(state.runCount)]
-      ];
-    },
-    progress(state) {
-      const total = Math.max(num(state.missingSbcCount), num(state.queue?.length), 1);
-      const done = Math.max(num(state.processedSbcCount), num(state.currentJobIndex) + 1, 0);
-      if (state.running) return (done / total) * 100;
-      return state.completedAt ? 100 : 0;
-    },
-    extra: { label: "Aç", title: "Aktif Futbin URL'yi aç", icon: "external" }
-  },
-  {
-    id: "webapp",
-    title: "Web App Sync",
-    color: "#ff4d6d",
-    icon: "layout",
-    operations: ["web-app-sync"],
-    stateKey: "webAppSyncState",
-    logsKey: "webAppSyncLogs",
-    errorsKey: "webAppSyncErrors",
-    dailyLogsKey: "webAppOnlyDailyRunLogs",
-    snapshotState(response) {
-      const root = response?.webAppSyncState || {};
-      return root.runs?.["web-app-sync"] || root;
-    },
-    logs(response) {
-      const syncLogs = response?.webAppSyncLogs || [];
-      const dailyLogs = response?.webAppOnlyDailyRunLogs || [];
-      return [...syncLogs, ...dailyLogs.map((entry) => ({
-        at: entry.completedAt || entry.updatedAt,
-        message: `${entry.date || "Günlük"} başarı kaydı · Rarity ${num(entry.rarity?.saved)} · SBC ${num(entry.sbc?.saved)}`
-      }))];
-    },
-    errors(response) {
-      return response?.webAppSyncErrors || [];
-    },
-    metrics(state) {
-      return [
-        ["Adım", `${num(state.currentJobIndex) + 1}/${Math.max(num(state.queue?.length), 0)}`],
-        ["Saved", num(state.savedPlayers)],
-        ["Skipped", num(state.skippedPlayers)],
-        ["Run", num(state.runCount)],
-        ["Saat", state.scheduleTime || "--"],
-        ["Tab", state.tabId || "--"]
-      ];
-    },
-    progress: queueProgress,
-    extra: { label: "Aç", title: "Aktif Web App URL'yi aç", icon: "external" }
-  }
 ];
 
 const panels = new Map();
 const latestSnapshots = new Map();
 const dashboard = document.querySelector("#dashboard");
 const template = document.querySelector("#panelTemplate");
+const globalStart = document.querySelector("#global-start");
+const globalTerminate = document.querySelector("#global-terminate");
+let centralSyncEnabled = false;
 
 init();
 setInterval(renderCountdowns, 1000);
@@ -153,7 +81,8 @@ setInterval(refreshAll, 2500);
 
 chrome.storage.onChanged.addListener((changes, area) => {
   if (area !== "local") return;
-  const keys = modules.flatMap((module) => [module.stateKey, module.logsKey, module.errorsKey, module.dailyLogsKey].filter(Boolean));
+  if (changes.fcSyncEnabled) refreshCentralControl();
+  const keys = modules.flatMap((module) => [module.stateKey, module.logsKey, module.errorsKey].filter(Boolean));
   if (keys.some((key) => changes[key])) refreshAll();
 });
 
@@ -161,10 +90,13 @@ async function init() {
   await API_CONFIG.ready;
   DEFAULT_API_BASE_URL = API_CONFIG.defaultBaseUrl();
   DEFAULT_WAIT_MS = API_CONFIG.number("WAIT_MS", 5000);
+  globalStart.addEventListener("click", () => runCentralSync("START_SYNC"));
+  globalTerminate.addEventListener("click", () => runCentralSync("STOP_SYNC"));
   for (const module of modules) {
     mountPanel(module);
   }
   await refreshAll();
+  await refreshCentralControl();
 }
 
 function mountPanel(module) {
@@ -178,20 +110,14 @@ function mountPanel(module) {
   panel.querySelector(".errors-icon").innerHTML = icon("alert");
   panel.querySelector(".countdown-icon").innerHTML = icon("clock");
 
-  const start = panel.querySelector(".start");
-  const stop = panel.querySelector(".stop");
   const clear = panel.querySelector(".clear");
   const extra = panel.querySelector(".extra");
-  start.innerHTML = `${icon("play")}<span>Başlat</span>`;
-  stop.innerHTML = `${icon("stop")}<span>Finish</span>`;
   clear.innerHTML = icon("trash");
   clear.title = "Panel verisini temizle";
   extra.innerHTML = icon(module.extra.icon);
   extra.title = module.extra.title;
   extra.hidden = module.hasExtra === false;
 
-  start.addEventListener("click", () => startModule(module));
-  stop.addEventListener("click", () => stopModule(module));
   clear.addEventListener("click", () => clearModule(module));
   extra.addEventListener("click", () => extraAction(module));
 
@@ -213,23 +139,46 @@ async function refreshModule(module) {
   }
 }
 
-async function startModule(module) {
-  const payload = {
-    apiBaseUrl: DEFAULT_API_BASE_URL,
-    waitMs: DEFAULT_WAIT_MS
-  };
-  if (module.operations.length) payload.operations = module.operations;
-  if (module.id === "webapp") payload.forceNow = true;
-  await action(module, "START_SYNC", payload);
-}
-
-async function stopModule(module) {
-  const payload = module.operations.length ? { operations: module.operations } : {};
-  await action(module, "STOP_SYNC", payload);
-}
-
 async function clearModule(module) {
+  if (centralSyncEnabled) {
+    showToast("FC Sync çalışırken panel verisi temizlenemez. Önce merkezi denetimden tamamen sonlandırın.");
+    return;
+  }
   await action(module, "CLEAR_SYNC", { apiBaseUrl: DEFAULT_API_BASE_URL });
+}
+
+async function refreshCentralControl() {
+  try {
+    const response = await chrome.runtime.sendMessage({ futbinSyncModule: "fc-sync", type: "GET_SNAPSHOT" });
+    centralSyncEnabled = Boolean(response?.enabled);
+    globalStart.disabled = centralSyncEnabled;
+    globalTerminate.disabled = !centralSyncEnabled;
+    globalStart.setAttribute("aria-pressed", String(centralSyncEnabled));
+    globalTerminate.setAttribute("aria-pressed", String(!centralSyncEnabled));
+  } catch (error) {
+    globalStart.disabled = true;
+    globalTerminate.disabled = true;
+    showToast(`Merkezi denetim kullanılamıyor: ${error.message || error}`);
+  }
+}
+
+async function runCentralSync(type) {
+  globalStart.disabled = true;
+  globalTerminate.disabled = true;
+  try {
+    const response = await chrome.runtime.sendMessage({
+      futbinSyncModule: "fc-sync",
+      type,
+      apiBaseUrl: DEFAULT_API_BASE_URL,
+      waitMs: DEFAULT_WAIT_MS
+    });
+    if (!response?.ok) throw new Error(response?.error || "İşlem başarısız.");
+    await Promise.all([refreshAll(), refreshCentralControl()]);
+  } catch (error) {
+    showToast(`FC Sync: ${error.message || error}`);
+  } finally {
+    await refreshCentralControl();
+  }
 }
 
 async function extraAction(module) {
@@ -286,14 +235,6 @@ function renderModule(module, response) {
   panel.querySelector(".metric-grid").innerHTML = metrics.map(([label, value]) => `
     <div class="metric" data-metric-label="${escapeHtml(label)}"><span>${icon(metricIcon(label))}${escapeHtml(label)}</span><strong>${escapeHtml(value)}</strong></div>
   `).join("");
-
-  const startButton = panel.querySelector(".start");
-  const stopButton = panel.querySelector(".stop");
-  const canStop = Boolean(state.running || state.nextRunAt);
-  startButton.hidden = canStop;
-  stopButton.hidden = !canStop;
-  startButton.disabled = canStop;
-  stopButton.disabled = !canStop;
 
   renderCountdown(module, state);
   renderLines(panel.querySelector(".logs"), logs, "Henüz log yok.", false, module.id);

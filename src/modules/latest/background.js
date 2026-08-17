@@ -5,6 +5,7 @@ const RECORDS_KEY = "latestPlayerRecords";
 const LOGS_KEY = "latestSyncLogs";
 const ERRORS_KEY = "latestSyncErrors";
 const AUTO_RUN_KEY = "latestAutoRunEnabled";
+const FC_SYNC_ENABLED_KEY = "fcSyncEnabled";
 const PAGE_TIMEOUT_ALARM = "latest-futbin-sync-page-timeout";
 const JOB_ADVANCE_ALARM = "latest-futbin-sync-job-advance";
 const SYNC_LOOP_ALARM = "latest-futbin-sync-loop";
@@ -43,7 +44,6 @@ const EXTENSION_OPERATIONS = ["coin-cards"];
 const RUNNER_IDS = [EXTENSION_RUNNER_ID];
 const RUNNER_OPERATIONS = { [EXTENSION_RUNNER_ID]: EXTENSION_OPERATIONS };
 const FINISHED_STATUS = "Finished";
-const SBC_PLAYERS_PAUSED_STATUS = "SBC Players için geçici duraklatıldı.";
 let stateWriteQueue = Promise.resolve();
 let storageWriteQueue = Promise.resolve();
 let runToken = 0;
@@ -112,16 +112,16 @@ chrome.runtime.onInstalled.addListener(async () => {
   if (!saved[RECORDS_KEY]) await chrome.storage.local.set({ [RECORDS_KEY]: [] });
   if (!saved[LOGS_KEY]) await chrome.storage.local.set({ [LOGS_KEY]: [] });
   if (!saved[ERRORS_KEY]) await chrome.storage.local.set({ [ERRORS_KEY]: [] });
-  if (typeof saved[AUTO_RUN_KEY] !== "boolean") {
-    await chrome.storage.local.set({
-      [AUTO_RUN_KEY]: !saved[STATE_KEY] || !isFinishedState(saved[STATE_KEY])
-    });
-  }
-  await ensureLatestAutoRun("extension-installed");
+  await chrome.storage.local.set({ [AUTO_RUN_KEY]: false });
+  await pauseSync();
 });
 
 chrome.runtime.onStartup.addListener(async () => {
-  syncLog("Eklenti başlangıcı; Latest otomatik çalışma kontrol ediliyor");
+  if (!await isFcSyncEnabled()) {
+    await pauseSync();
+    return;
+  }
+  syncLog("FC Sync etkin; Latest otomatik çalışma kontrol ediliyor");
   await ensureLatestAutoRun("browser-startup");
 });
 
@@ -143,8 +143,14 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 globalThis.FutbinSyncModuleControls = globalThis.FutbinSyncModuleControls || {};
 globalThis.FutbinSyncModuleControls.latest = {
   getSnapshot: async () => ({ ok: true, ...(await chrome.storage.local.get([STATE_KEY, RECORDS_KEY, LOGS_KEY, ERRORS_KEY])) }),
-  pauseForSbcPlayers,
-  resumeAfterSbcPlayers
+  start: async ({ apiBaseUrl, waitMs, operations } = {}) => {
+    await chrome.storage.local.set({ [AUTO_RUN_KEY]: true });
+    return startParallelSync(apiBaseUrl, waitMs, operations || EXTENSION_OPERATIONS);
+  },
+  stop: async () => {
+    await chrome.storage.local.set({ [AUTO_RUN_KEY]: false });
+    return pauseSync();
+  }
 };
 
 async function handleMessage(message, sender) {
@@ -157,10 +163,6 @@ async function handleMessage(message, sender) {
     case "STOP_SYNC":
       await chrome.storage.local.set({ [AUTO_RUN_KEY]: false });
       return pauseSync(message.operations);
-    case "PAUSE_FOR_SBC_PLAYERS":
-      return pauseForSbcPlayers();
-    case "RESUME_AFTER_SBC_PLAYERS":
-      return resumeAfterSbcPlayers();
     case "CLEAR_SYNC":
       await clearAllRunnerAlarms();
       {
@@ -176,7 +178,8 @@ async function handleMessage(message, sender) {
       }
       await setState({ ...emptyState, apiBaseUrl: message.apiBaseUrl || emptyState.apiBaseUrl });
       await chrome.storage.local.set({ [RECORDS_KEY]: [], [LOGS_KEY]: [], [ERRORS_KEY]: [] });
-      return ensureLatestAutoRun("clear-completed");
+      await chrome.storage.local.set({ [AUTO_RUN_KEY]: false });
+      return { ok: true, state: await getState() };
     case "GET_SNAPSHOT":
       // Önceki sürümlerden kalan büyük popup koleksiyonunu da temizle.
       {
@@ -207,6 +210,10 @@ async function handleMessage(message, sender) {
 
 async function ensureLatestAutoRun(reason) {
   await API_CONFIG.ready;
+  if (!await isFcSyncEnabled()) {
+    syncLog("Latest otomatik başlangıç merkezi durdurma nedeniyle atlandı", { reason });
+    return { ok: true, skipped: true, reason: "central-sync-stopped" };
+  }
   const stored = await chrome.storage.local.get(AUTO_RUN_KEY);
   if (stored[AUTO_RUN_KEY] === false) {
     syncLog("Latest otomatik başlangıç kullanıcı Stop tercihi nedeniyle atlandı", { reason });
@@ -566,69 +573,6 @@ async function pauseSync(rawOperations = null) {
     }
   }
   return { ok: true, state: await getState() };
-}
-
-async function pauseForSbcPlayers() {
-  const state = await getState(EXTENSION_RUNNER_ID);
-  if (!state.running || state.nextRunAt || isFinishedState(state)) {
-    return { ok: true, paused: false, state };
-  }
-  const pausedBySbcPlayers = {
-    apiBaseUrl: state.apiBaseUrl || DEFAULT_API_BASE_URL,
-    waitMs: futbinRequestDelayMs(state),
-    operations: state.operations?.length ? state.operations : RUNNER_OPERATIONS[state.runnerId || EXTENSION_RUNNER_ID],
-    runnerId: state.runnerId || EXTENSION_RUNNER_ID,
-    pausedAt: Date.now()
-  };
-  runToken++;
-  await Promise.all([
-    chrome.alarms.clear(pageTimeoutAlarmName(state)),
-    chrome.alarms.clear(jobAdvanceAlarmName(state)),
-    chrome.alarms.clear(syncLoopAlarmName(state))
-  ]);
-  for (const controller of activeRequestControllers) controller.abort();
-  activeRequestControllers.clear();
-  cancelPendingDelays();
-  if (state.tabId) await closeRunnerTab(state.tabId, state);
-  const paused = {
-    ...state,
-    running: false,
-    tabId: null,
-    awaitingFutbinVerification: false,
-    futbinChallengeDetectedAt: null,
-    futbinChallengeTabId: null,
-    futbinChallengeUrl: null,
-    nextRunAt: null,
-    currentUrl: null,
-    status: SBC_PLAYERS_PAUSED_STATUS,
-    error: null,
-    pausedBySbcPlayers,
-    updatedAt: Date.now()
-  };
-  await setState(paused);
-  return { ok: true, paused: true, state: await getState() };
-}
-
-async function resumeAfterSbcPlayers() {
-  const state = await getState(EXTENSION_RUNNER_ID);
-  const paused = state.pausedBySbcPlayers;
-  if (!paused) return { ok: true, resumed: false, state };
-  if (state.running && !state.nextRunAt) return { ok: true, resumed: false, alreadyRunning: true, state };
-  await setState({
-    ...state,
-    pausedBySbcPlayers: null,
-    status: "SBC Players tamamlandı; Latest Player Sync yeniden başlatılıyor",
-    updatedAt: Date.now()
-  });
-  return startFreshSync(
-    paused.apiBaseUrl || state.apiBaseUrl || DEFAULT_API_BASE_URL,
-    paused.waitMs || futbinRequestDelayMs(state),
-    paused.operations?.length ? paused.operations : RUNNER_OPERATIONS[paused.runnerId || EXTENSION_RUNNER_ID],
-    (Number(state.runCount) || 0) + 1,
-    paused.runnerId || state.runnerId || EXTENSION_RUNNER_ID,
-    false,
-    ++runToken
-  );
 }
 
 chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
@@ -2044,7 +1988,7 @@ async function failSync(error, currentState = null) {
   await chrome.alarms.clear(jobAdvanceAlarmName(state));
   await chrome.alarms.clear(syncLoopAlarmName(state));
   const stored = await chrome.storage.local.get(AUTO_RUN_KEY);
-  const autoRunEnabled = stored[AUTO_RUN_KEY] !== false;
+  const autoRunEnabled = await isFcSyncEnabled() && stored[AUTO_RUN_KEY] !== false;
   const nextRunAt = autoRunEnabled ? Date.now() + SYNC_LOOP_DELAY_MS : null;
   const failed = {
     ...state,
@@ -2943,6 +2887,10 @@ async function scheduleLoopAlarm(state) {
 
 function isFinishedState(state) {
   return state?.status === FINISHED_STATUS;
+}
+
+async function isFcSyncEnabled() {
+  return Boolean((await chrome.storage.local.get(FC_SYNC_ENABLED_KEY))[FC_SYNC_ENABLED_KEY]);
 }
 
 function sameRun(expected, current) {

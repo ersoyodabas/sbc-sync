@@ -1,14 +1,12 @@
 {
   "manifest_version": 3,
-  "name": "Sync",
+  "name": "FC Sync",
   "version": "2.0.0",
-  "description": "Futbin ve EA FC Web App senkronizasyonlarını tek dashboard üzerinden yönetir.",
-  "permissions": ["storage", "alarms", "offscreen", "tabs", "scripting", "debugger", "nativeMessaging"],
+  "description": "Futbin oyuncu senkronizasyonlarını FC Sync dashboard üzerinden yönetir.",
+  "permissions": ["storage", "alarms", "offscreen", "tabs", "scripting"],
   "host_permissions": [
     "https://www.futbin.com/*",
     "https://futbin.com/*",
-    "https://www.ea.com/ea-sports-fc/ultimate-team/web-app/*",
-    "https://signin.ea.com/*",
     "https://api.sbcmonster.com/*",
     "http://localhost:5055/*"
   ],
@@ -26,20 +24,6 @@
       "matches": ["https://www.futbin.com/*", "https://futbin.com/*"],
       "js": ["src/modules/important/content.js"],
       "run_at": "document_idle"
-    },
-    {
-      "matches": [
-        "https://www.ea.com/ea-sports-fc/ultimate-team/web-app/*",
-        "https://signin.ea.com/*"
-      ],
-      "js": [
-        "src/config/api.js",
-        "src/modules/webapp/actions/webAppSync/app.js",
-        "src/modules/webapp/actions/webAppSync/sync_rarity.js",
-        "src/modules/webapp/actions/webAppSync/sync_sbc.js",
-        "src/modules/webapp/actions/webAppSync/core.js"
-      ],
-      "run_at": "document_idle"
     }
   ],
   "web_accessible_resources": [
@@ -47,13 +31,12 @@
       "resources": [
         ".env",
         "src/config/api.js",
-        "src/assets/img/appLogoSmall.png",
-        "src/modules/webapp/actions/webAppSync/page_api_bridge.js"
+        "src/assets/img/appLogoSmall.png"
       ],
       "matches": ["<all_urls>"]
     }
   ],	
   "action": {
-    "default_title": "Sync Dashboard"
+    "default_title": "FC Sync Dashboard"
   }
 }

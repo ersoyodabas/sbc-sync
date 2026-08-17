@@ -3,10 +3,15 @@
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>Daily Sync</title>
+    <title>FC Sync</title>
     <link rel="stylesheet" href="src/dashboard.css">
   </head>
   <body>
+    <div id="global-control" class="global-control" aria-label="FC Sync merkezi denetimi">
+      <span class="global-control-label">FC Sync</span>
+      <button id="global-start" class="global-button global-start" type="button">Başlat</button>
+      <button id="global-terminate" class="global-button global-terminate" type="button">Tamamen Sonlandır</button>
+    </div>
     <main class="app-shell">
       <section id="dashboard" class="dashboard" aria-label="FutbinSync dashboard"></section>
     </main>
@@ -23,8 +28,6 @@
             <div class="panel-controls">
               <button class="ghost clear" type="button"></button>
               <button class="ghost extra" type="button"></button>
-              <button class="primary start" type="button"></button>
-              <button class="danger stop" type="button"></button>
             </div>
           </div>
         </header>
