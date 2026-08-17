@@ -62,6 +62,10 @@ chrome.runtime.onStartup.addListener(async () => {
 });
 chrome.alarms.onAlarm.addListener(async (alarm) => {
   if (alarm.name !== ALARM) return;
+  if (!await isFcSyncEnabled()) {
+    await chrome.alarms.clear(ALARM);
+    return;
+  }
   const state = await getState();
   if (!state.running || !state.waitingForNextRun || !state.nextRunAt || isFinishedState(state)) {
     await chrome.alarms.clear(ALARM);
@@ -142,6 +146,7 @@ async function handleMessage(message) {
 }
 
 async function startSync(scheduled = false, rawApiBaseUrl) {
+  if (!await isFcSyncEnabled()) return { ok: false, stopped: true, state: await getState() };
   const existing = await getState();
   if (scheduled && isFinishedState(existing)) return { ok: false, finished: true, state: existing };
   if (existing.running && !existing.waitingForNextRun) return { ok: true, state: existing, alreadyRunning: true };
@@ -554,7 +559,7 @@ function inferQualityCode(raw, rarityInfo) {
 }
 function preferPlayer(old, next) { if (!old) return next; return (next.price_console || next.price_pc || next.priceConsole || next.pricePc) ? next : old; }
 function assertActive(token) { if (token !== runToken) throw new DOMException("Sync finished", "AbortError"); }
-async function isActiveRun(token) { const state = await getState(); return token === runToken && state.running && !isFinishedState(state); }
+async function isActiveRun(token) { const state = await getState(); return Boolean(await isFcSyncEnabled() && token === runToken && state.running && !isFinishedState(state)); }
 function isFinishedState(state) { return !state?.running && state?.status === FINISHED_STATUS; }
 async function isFcSyncEnabled() { return Boolean((await chrome.storage.local.get(FC_SYNC_ENABLED_KEY))[FC_SYNC_ENABLED_KEY]); }
 async function stopSync() {
@@ -606,7 +611,7 @@ async function failRun(token, error) {
   const state = await getState();
   await patchState({ running: !!nextRunAt, waitingForNextRun: !!nextRunAt, status: nextRunAt ? `Tur tamamlanamadı — yeniden deneme bekleniyor` : "Tur tamamlanamadı", errors: [...state.errors, error.message], logs: [...(state.logs || []), logEntry(`${state.roundNumber || 1}. tur tamamlandı · sonraki tur planlandı`)].slice(-500), nextRunAt });
 }
-async function ensureAlarm() { const state = await getState(); if (state.running && !isFinishedState(state) && state.nextRunAt > Date.now()) await chrome.alarms.create(ALARM, { when: state.nextRunAt }); }
+async function ensureAlarm() { const state = await getState(); if (await isFcSyncEnabled() && state.running && !isFinishedState(state) && state.nextRunAt > Date.now()) await chrome.alarms.create(ALARM, { when: state.nextRunAt }); else await chrome.alarms.clear(ALARM); }
 async function apiRequest(base, path, options = {}) {
   await API_CONFIG.ready;
   void base;

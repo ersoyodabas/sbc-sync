@@ -259,6 +259,7 @@ async function startParallelSync(rawApiBaseUrl, rawWaitMs, rawOperations) {
 }
 
 async function startFreshSync(rawApiBaseUrl, rawWaitMs, rawOperations, runCount = 0, rawRunnerId = null, isScheduledStart = false, token = runToken) {
+  if (!await isFcSyncEnabled()) return { ok: false, stopped: true, state: await getState(rawRunnerId || EXTENSION_RUNNER_ID) };
   const operations = normalizeOperations(rawOperations);
   if (!operations.length) throw new Error("En az bir işlem seçilmelidir.");
   const runnerId = rawRunnerId || operationRunnerId(operations[0]);
@@ -443,6 +444,7 @@ async function prepareLatestCoinCardRun({ apiBaseUrl, waitMs, runCount, runStart
 }
 
 async function resumePausedSync() {
+  if (!await isFcSyncEnabled()) return { ok: false, stopped: true, state: await getState() };
   const state = await getState();
   if (state.running) return { ok: true, state };
   if (isFinishedState(state)) throw new Error("Yeniden başlatmak için Start Sync düğmesine basın.");
@@ -579,7 +581,7 @@ chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
   if (changeInfo.status !== "loading" && changeInfo.status !== "complete" && !changeInfo.url) return;
   const state = await getStateByTabId(tabId);
   const observedUrl = changeInfo.url || tab.url || "";
-  if (!state.running || tabId !== state.tabId || !matchesCurrentPage(observedUrl, state)) return;
+  if (!await isActiveRun(state) || tabId !== state.tabId || !matchesCurrentPage(observedUrl, state)) return;
   await dispatchLatestPageWhenReady(tabId, observedUrl, state, changeInfo.status || (changeInfo.url ? "url" : "update"));
 });
 
@@ -605,6 +607,7 @@ async function dispatchLatestPageWhenReady(tabId, observedUrl, state, trigger) {
     await sendCollectSyncPageMessage(tabId, liveState);
   } catch (error) {
     activePageDispatches.delete(dispatchKey);
+    if (!await isActiveRun(state)) return;
     syncError("Content script başlatılamadı", error, stateLogDetails(state));
     await handlePageFailure(`İçerik script'i çalışmadı: ${state.currentUrl}`, state);
   }
@@ -656,12 +659,16 @@ async function sendCollectSyncPageMessage(tabId, state) {
 chrome.tabs.onRemoved.addListener(async (tabId) => {
   if (controlledTabCloseIds.delete(tabId)) return;
   const state = await getStateByTabId(tabId);
-  if (!state.running || state.tabId !== tabId) return;
+  if (!await isActiveRun(state) || state.tabId !== tabId) return;
   await recoverRunnerTab(state);
 });
 
 async function ensureAutomaticSchedule() {
   const state = await getState(EXTENSION_RUNNER_ID);
+  if (!await isFcSyncEnabled()) {
+    await chrome.alarms.clear(syncLoopAlarmName(state));
+    return state;
+  }
   if (isFinishedState(state) || !state.userStarted || !state.nextRunAt || state.running) {
     await chrome.alarms.clear(syncLoopAlarmName(state));
     return state;
@@ -674,7 +681,7 @@ async function ensureAutomaticSchedule() {
 async function handleSyncLoopAlarm(runnerId) {
   await chrome.alarms.clear(syncLoopAlarmName(runnerId));
   const state = await getState(runnerId);
-  if (isFinishedState(state) || !state.userStarted || !state.nextRunAt) {
+  if (!await isFcSyncEnabled() || isFinishedState(state) || !state.userStarted || !state.nextRunAt) {
     syncLog("Otomatik çalışma iptal edilmiş; loop alarmı yok sayıldı", { runnerId });
     return;
   }
@@ -692,7 +699,7 @@ async function handleSyncLoopAlarm(runnerId) {
 
 async function runScheduledLatestSync(existingState = null) {
   const state = existingState || await getState(EXTENSION_RUNNER_ID);
-  if (isFinishedState(state) || !state.userStarted) return { ok: false, stopped: true, state };
+  if (!await isFcSyncEnabled() || isFinishedState(state) || !state.userStarted) return { ok: false, stopped: true, state };
   syncLog("Otomatik Latest Player Sync başlatılıyor", stateLogDetails(state));
   return startFreshSync(
     state.apiBaseUrl || DEFAULT_API_BASE_URL,
@@ -767,7 +774,7 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
   const advanceRunnerId = runnerIdFromAlarmName(alarm.name, JOB_ADVANCE_ALARM);
   if (advanceRunnerId) {
     const state = await getState(advanceRunnerId);
-    if (!state.running || isFinishedState(state) || !state.currentUrl || !state.nextRunAt) {
+    if (!await isActiveRun(state) || !state.currentUrl || !state.nextRunAt) {
       syncLog("Geçersiz veya eski iş alarmı yok sayıldı", stateLogDetails(state));
       return;
     }
@@ -778,7 +785,7 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
   const timeoutRunnerId = runnerIdFromAlarmName(alarm.name, PAGE_TIMEOUT_ALARM);
   if (!timeoutRunnerId) return;
   const state = await getState(timeoutRunnerId);
-  if (!state.running || isFinishedState(state)) return;
+  if (!await isActiveRun(state)) return;
   await handlePageFailure(`Sayfa zaman aşımına uğradı: ${state.currentUrl}`, state);
 });
 
@@ -789,7 +796,7 @@ async function handlePageResult(message, sender) {
   const isCurrent = message.backgroundFetch
     ? state.running && Number(message.page) === state.currentPage && matchesCurrentPage(message.pageUrl, state)
     : isCurrentPageSender(state, message, sender);
-  if (!isCurrent) return { ok: false, error: "Eski sayfa sonucu yok sayıldı." };
+  if (!isCurrent || !await isActiveRun(state)) return { ok: false, error: "Eski veya durdurulmuş sayfa sonucu yok sayıldı." };
 
   const job = currentJob(state);
   syncLog("Sayfa sonucu alındı", { ...stateLogDetails(state), receivedUrl: message.pageUrl });
@@ -905,25 +912,26 @@ async function handlePageResult(message, sender) {
 
 async function handleCriticalPageError(message, sender) {
   const state = await getStateByTabId(sender.tab?.id);
-  if (!isCurrentPageSender(state, message, sender)) return { ok: false };
+  if (!isCurrentPageSender(state, message, sender) || !await isActiveRun(state)) return { ok: false };
   await failSync(message.error || "[CRITICAL] Futbin sayfası doğrulanamadı.", state);
   return { ok: false, critical: true };
 }
 
 async function handleReportedPageFailure(message, sender) {
   const state = await getStateByTabId(sender.tab?.id);
-  if (!isCurrentPageSender(state, message, sender)) return { ok: false, error: "Eski sayfa hatası yok sayıldı." };
+  if (!isCurrentPageSender(state, message, sender) || !await isActiveRun(state)) return { ok: false, error: "Eski veya durdurulmuş sayfa hatası yok sayıldı." };
   return recordPageFailure(state, message.error || `Sayfa yüklenemedi: ${message.pageUrl}`);
 }
 
 async function handlePageFailure(error, currentState = null) {
   const state = currentState || await getState();
-  if (!state.running) return;
+  if (!await isActiveRun(state)) return;
   const action = await recordPageFailure(state, error);
   if (action?.nextUrl) await performAdvance(action.nextUrl, state.runnerId);
 }
 
 async function recordPageFailure(state, error) {
+  if (!await isActiveRun(state)) return { ok: false, action: "STOPPED" };
   const failed = {
     ...state,
     pagesAttempted: state.pagesAttempted + 1,
@@ -936,6 +944,7 @@ async function recordPageFailure(state, error) {
 }
 
 async function finishOrScheduleNextPage(state) {
+  if (!await isActiveRun(state)) return { ok: false, action: "STOPPED" };
   if (state.currentPage < state.totalPages) {
     const nextPage = state.currentPage + 1;
     const nextUrl = buildJobUrl(currentJob(state), nextPage);
@@ -1455,14 +1464,14 @@ async function submitCurrentCoinCardAndPrepareNext(state) {
 async function advanceFromContentTimer(message, sender) {
   const state = await getStateByTabId(sender.tab?.id);
   syncLog("Content script geçiş isteği aldı", { ...stateLogDetails(state), requestedUrl: message.url });
-  if (!state.running || !state.nextRunAt || sender.tab?.id !== state.tabId || message.url !== state.currentUrl) return { ok: false };
+  if (!await isActiveRun(state) || !state.nextRunAt || sender.tab?.id !== state.tabId || message.url !== state.currentUrl) return { ok: false };
   await performAdvance(message.url, state.runnerId);
   return { ok: true };
 }
 
 async function performAdvance(url, runnerId = null) {
   const state = await getState(runnerId);
-  if (!state.running || isFinishedState(state) || !state.nextRunAt || url !== state.currentUrl) {
+  if (!await isActiveRun(state) || !state.nextRunAt || url !== state.currentUrl) {
     syncLog("Geçiş isteği eski olduğu için yok sayıldı", { ...stateLogDetails(state), requestedUrl: url });
     return;
   }
@@ -2774,7 +2783,7 @@ async function scheduleNextLoop(state, totalSaved, totalSkipped, clubSaveResults
   await chrome.alarms.clear(jobAdvanceAlarmName(state));
   await chrome.alarms.clear(syncLoopAlarmName(state));
   const liveState = await getState(state.runnerId);
-  if (!liveState.running) {
+  if (!await isActiveRun(state) || !liveState.running) {
     return { ok: true, action: "STOPPED" };
   }
   const latestResult = clubSaveResults?.["coin-card:latest"] || {};
@@ -2879,6 +2888,10 @@ async function scheduleJobAdvance(state) {
 }
 
 async function scheduleLoopAlarm(state) {
+  if (!await isFcSyncEnabled()) {
+    await chrome.alarms.clear(syncLoopAlarmName(state));
+    return;
+  }
   const when = Math.max(Date.now(), Number(state.nextRunAt) || Date.now() + SYNC_LOOP_DELAY_MS);
   await chrome.alarms.clear(syncLoopAlarmName(state));
   await chrome.alarms.create(syncLoopAlarmName(state), { when });
@@ -2899,7 +2912,7 @@ function sameRun(expected, current) {
 
 async function isActiveRun(expected) {
   const current = await getState(expected?.runnerId);
-  return Boolean(current.running && !isFinishedState(current) && sameRun(expected, current));
+  return Boolean(await isFcSyncEnabled() && current.running && !isFinishedState(current) && sameRun(expected, current));
 }
 
 function futbinRequestDelayMs(value) {
