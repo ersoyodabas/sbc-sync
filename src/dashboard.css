@@ -122,6 +122,17 @@ button:disabled {
     0 0 34px color-mix(in srgb, var(--module-color) 14%, transparent),
     var(--shadow);
   padding: 10px;
+  transition: opacity 160ms ease;
+}
+
+.sync-panel[data-active="false"] {
+  opacity: .5;
+}
+
+.central-status {
+  color: #8fd4ff;
+  font-size: 10px;
+  white-space: nowrap;
 }
 
 .sync-panel::after {

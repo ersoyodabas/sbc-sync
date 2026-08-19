@@ -28,7 +28,7 @@ const initialState = {
   pagesSucceeded: 0, parsedPlayers: 0, mappedPlayers: 0, skippedPlayers: 0,
   savedPlayers: 0, insertedPlayers: 0, updatedPlayers: 0, errors: [], nextRunAt: null,
   startedAt: null, completedAt: null, updatedAt: null, logs: [], roundNumber: 0,
-  waitingForNextRun: false,
+  waitingForNextRun: false, runOnce: false, centralManaged: false, centralRunId: null,
   awaitingFutbinVerification: false,
   futbinChallengeDetectedAt: null,
   futbinChallengeTabId: null,
@@ -41,13 +41,12 @@ chrome.runtime.onInstalled.addListener(async () => {
   await setState({ ...(saved || initialState), apiBaseUrl: defaultApiBaseUrl(), running: false, waitingForNextRun: false, nextRunAt: null, status: "Hazır - merkezi başlatma bekleniyor" });
 });
 chrome.runtime.onStartup.addListener(async () => {
-  if (!await isFcSyncEnabled()) {
+  const state = await getState();
+  if (state.runOnce || state.centralManaged || !await isFcSyncEnabled()) {
     await chrome.alarms.clear(ALARM);
-    const state = await getState();
     await setState({ ...state, running: false, waitingForNextRun: false, nextRunAt: null, status: "Hazır - merkezi başlatma bekleniyor" });
     return;
   }
-  const state = await getState();
   if (isFinishedState(state)) {
     await chrome.alarms.clear(ALARM);
     return;
@@ -57,7 +56,7 @@ chrome.runtime.onStartup.addListener(async () => {
   if (state.waitingForNextRun && state.nextRunAt > Date.now()) await ensureAlarm();
   else {
     await patchState({ waitingForNextRun: true, nextRunAt: null, status: "Yarım kalan tur yeniden başlatılıyor" });
-    await startSync(true);
+    await startSync({ scheduled: true });
   }
 });
 chrome.alarms.onAlarm.addListener(async (alarm) => {
@@ -71,7 +70,7 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
     await chrome.alarms.clear(ALARM);
     return;
   }
-  await startSync(true);
+  await startSync({ scheduled: true });
 });
 chrome.runtime.onMessage.addListener((message, _sender, respond) => {
   if (message?.futbinSyncModule !== "important") return false;
@@ -111,24 +110,23 @@ chrome.runtime.onConnect.addListener((port) => {
 globalThis.FutbinSyncModuleControls = globalThis.FutbinSyncModuleControls || {};
 globalThis.FutbinSyncModuleControls.important = {
   getSnapshot: async () => ({ ok: true, state: await getState() }),
-  start: async ({ apiBaseUrl } = {}) => startSync(false, apiBaseUrl || defaultApiBaseUrl()),
+  start: async (options = {}) => startSync({ ...options, apiBaseUrl: options.apiBaseUrl || defaultApiBaseUrl() }),
   stop: stopSync,
   startAfterLatest: async () => {
     await API_CONFIG.ready;
-    if (!await isFcSyncEnabled()) return { ok: true, skipped: true, reason: "central-sync-stopped", state: await getState() };
     const state = await getState();
     if (state.running || state.waitingForNextRun || state.nextRunAt) {
       return { ok: true, skipped: true, reason: "already-active", state };
     }
     await appendLog("Latest Player Sync tamamlandı; Important Players otomatik başlatılıyor.");
-    return startSync(false, defaultApiBaseUrl());
+    return startSync({ apiBaseUrl: defaultApiBaseUrl(), runOnce: true });
   }
 };
 
 async function handleMessage(message) {
   await API_CONFIG.ready;
   if (message?.type === "GET_SNAPSHOT") return { ok: true, state: await getState() };
-  if (message?.type === "START_SYNC") return startSync(false, message.apiBaseUrl);
+  if (message?.type === "START_SYNC") return startSync({ apiBaseUrl: message.apiBaseUrl, runOnce: true });
   if (message?.type === "STOP_SYNC") return stopSync();
   if (message?.type === "CLEAR_SYNC") {
     await stopSync();
@@ -145,8 +143,10 @@ async function handleMessage(message) {
   return { ok: false, error: "Bilinmeyen mesaj" };
 }
 
-async function startSync(scheduled = false, rawApiBaseUrl) {
-  if (!await isFcSyncEnabled()) return { ok: false, stopped: true, state: await getState() };
+async function startSync({ scheduled = false, apiBaseUrl: rawApiBaseUrl, runOnce = false, centralManaged = false, centralRunId = null } = {}) {
+  if (!centralManaged && await isFcSyncEnabled()) {
+    return { ok: false, error: "Merkezi sync çalışırken tekil Important Players başlatılamaz." };
+  }
   const existing = await getState();
   if (scheduled && isFinishedState(existing)) return { ok: false, finished: true, state: existing };
   if (existing.running && !existing.waitingForNextRun) return { ok: true, state: existing, alreadyRunning: true };
@@ -154,7 +154,7 @@ async function startSync(scheduled = false, rawApiBaseUrl) {
   const apiBaseUrl = allowedApiBaseUrl(rawApiBaseUrl || existing.apiBaseUrl || defaultApiBaseUrl());
   const startedAt = Date.now();
   const roundNumber = (Number(existing.roundNumber) || 0) + 1;
-  await setState({ ...initialState, running: true, waitingForNextRun: false, roundNumber,
+  await setState({ ...initialState, running: true, waitingForNextRun: false, runOnce, centralManaged, centralRunId, roundNumber,
     status: `${roundNumber}. tur başladı`, apiBaseUrl, startedAt, updatedAt: Date.now(),
     logs: [...(existing.logs || []), logEntry(`${roundNumber}. çalışma turu başladı · API: ${apiBaseUrl}`)].slice(-500) });
   runSync(token, apiBaseUrl).catch((error) => failRun(token, error));
@@ -289,19 +289,27 @@ async function runSync(token, apiBaseUrl) {
   if (SINGLE_PAGE_DEBUG_MODE) {
     await chrome.alarms.clear(ALARM);
     await appendLog(`Tek sayfa debug işlemi tamamlandı · çekilen ${parsedTotal} · API'ye gönderilen ${saved} · insert ${inserted} · update ${updated} · işlemler durduruldu`);
-    await patchState({ running: false, status: "Tek sayfa tamamlandı — durduruldu", completedAt: Date.now(), nextRunAt: null });
+    await closeWorkingTabs();
+    const finished = await patchState({ running: false, status: "Tek sayfa tamamlandı — durduruldu", completedAt: Date.now(), nextRunAt: null });
+    if (finished.centralManaged) await notifyCentralRoundFinished(finished, true);
     return;
   }
-  const nextRunAt = Date.now() + LOOP_DELAY_MS;
+  const completedState = await getState();
+  const oneShot = Boolean(completedState.runOnce || completedState.centralManaged);
+  const nextRunAt = oneShot ? null : Date.now() + LOOP_DELAY_MS;
   if (!await isActiveRun(token)) return;
-  await chrome.alarms.create(ALARM, { when: nextRunAt });
+  await closeWorkingTabs();
+  if (nextRunAt) await chrome.alarms.create(ALARM, { when: nextRunAt }); else await chrome.alarms.clear(ALARM);
   if (!await isActiveRun(token)) {
     await chrome.alarms.clear(ALARM);
     return;
   }
   const state = await getState();
-  await appendLog(`${state.roundNumber}. tur tamamlandı · çekilen ${parsedTotal} · API'ye gönderilen ${saved} · insert ${inserted} · update ${updated} · sonraki tur 1 saat sonra`);
-  await patchState({ running: true, waitingForNextRun: true, status: `${state.roundNumber}. tur tamamlandı — yeni tur bekleniyor`, completedAt: Date.now(), nextRunAt });
+  await appendLog(oneShot
+    ? `${state.roundNumber}. tur tamamlandı · çekilen ${parsedTotal} · API'ye gönderilen ${saved} · insert ${inserted} · update ${updated}`
+    : `${state.roundNumber}. tur tamamlandı · çekilen ${parsedTotal} · API'ye gönderilen ${saved} · insert ${inserted} · update ${updated} · sonraki tur 1 saat sonra`);
+  const finished = await patchState({ running: !oneShot, waitingForNextRun: !oneShot, status: oneShot ? "Finished" : `${state.roundNumber}. tur tamamlandı — yeni tur bekleniyor`, completedAt: Date.now(), nextRunAt });
+  if (finished.centralManaged) await notifyCentralRoundFinished(finished, true);
 }
 
 async function fetchAndParsePage(page, token) {
@@ -367,7 +375,7 @@ async function fetchViaTab(url, token) {
     cancelActiveTabWait = null;
     activeFetchTabId = null;
     await appendLog(`Futbin sekmesi kapatılıyor · tab ${tab.id || "--"}`);
-    await chrome.tabs.remove(tab.id).catch(() => {});
+    await closeImportantTab(tab.id);
   }
 }
 
@@ -559,19 +567,22 @@ function inferQualityCode(raw, rarityInfo) {
 }
 function preferPlayer(old, next) { if (!old) return next; return (next.price_console || next.price_pc || next.priceConsole || next.pricePc) ? next : old; }
 function assertActive(token) { if (token !== runToken) throw new DOMException("Sync finished", "AbortError"); }
-async function isActiveRun(token) { const state = await getState(); return Boolean(await isFcSyncEnabled() && token === runToken && state.running && !isFinishedState(state)); }
+async function isActiveRun(token) { const state = await getState(); return Boolean(token === runToken && state.running && !isFinishedState(state)); }
 function isFinishedState(state) { return !state?.running && state?.status === FINISHED_STATUS; }
 async function isFcSyncEnabled() { return Boolean((await chrome.storage.local.get(FC_SYNC_ENABLED_KEY))[FC_SYNC_ENABLED_KEY]); }
 async function stopSync() {
   await cancelActiveWork("Sync finished");
   await patchState({
     running: false,
+    runOnce: false,
+    centralManaged: false,
+    centralRunId: null,
     waitingForNextRun: false,
     awaitingFutbinVerification: false,
     futbinChallengeDetectedAt: null,
     futbinChallengeTabId: null,
     futbinChallengeUrl: null,
-    status: FINISHED_STATUS,
+    status: "Hazır",
     nextRunAt: null
   });
   return { ok: true };
@@ -591,13 +602,32 @@ async function cancelActiveWork(reason = "Sync finished") {
     pending.reject(new DOMException(reason, "AbortError"));
     networkPending.delete(id);
   }
-  if (activeFetchTabId) await chrome.tabs.remove(activeFetchTabId).catch(() => {});
+  await closeWorkingTabs();
+  await chrome.alarms.clear(ALARM);
+}
+
+async function closeWorkingTabs() {
+  const tabIds = [...new Set([activeFetchTabId, networkTabId].filter((tabId) => Number.isInteger(Number(tabId))))];
   activeFetchTabId = null;
-  if (networkTabId) await chrome.tabs.remove(networkTabId).catch(() => {});
   networkPort?.disconnect();
   networkPort = null;
   networkTabId = null;
-  await chrome.alarms.clear(ALARM);
+  await Promise.all(tabIds.map((tabId) => closeImportantTab(tabId)));
+}
+
+async function closeImportantTab(tabId) {
+  if (!Number.isInteger(Number(tabId))) return true;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try { await chrome.tabs.remove(tabId); } catch { /* Sekme zaten kapalı olabilir. */ }
+    try {
+      await chrome.tabs.get(tabId);
+    } catch {
+      return true;
+    }
+    if (attempt < 2) await new Promise((resolve) => setTimeout(resolve, 120));
+  }
+  await appendLog(`Çalışma sekmesi kapatılamadı · tab ${tabId}`);
+  return false;
 }
 async function failRun(token, error) {
   if (!await isActiveRun(token)) return;
@@ -605,11 +635,26 @@ async function failRun(token, error) {
     error: error.message || String(error),
     stack: error.stack
   });
-  const nextRunAt = SINGLE_PAGE_DEBUG_MODE ? null : Date.now() + LOOP_DELAY_MS;
+  const stateBeforeFailure = await getState();
+  const oneShot = Boolean(stateBeforeFailure.runOnce || stateBeforeFailure.centralManaged);
+  const nextRunAt = oneShot || SINGLE_PAGE_DEBUG_MODE ? null : Date.now() + LOOP_DELAY_MS;
+  await closeWorkingTabs();
   if (nextRunAt) await chrome.alarms.create(ALARM, { when: nextRunAt }); else await chrome.alarms.clear(ALARM);
   if (!await isActiveRun(token)) { await chrome.alarms.clear(ALARM); return; }
   const state = await getState();
-  await patchState({ running: !!nextRunAt, waitingForNextRun: !!nextRunAt, status: nextRunAt ? `Tur tamamlanamadı — yeniden deneme bekleniyor` : "Tur tamamlanamadı", errors: [...state.errors, error.message], logs: [...(state.logs || []), logEntry(`${state.roundNumber || 1}. tur tamamlandı · sonraki tur planlandı`)].slice(-500), nextRunAt });
+  const failed = await patchState({ running: !!nextRunAt, waitingForNextRun: !!nextRunAt, status: nextRunAt ? `Tur tamamlanamadı — yeniden deneme bekleniyor` : "Tur tamamlanamadı", errors: [...state.errors, error.message], logs: [...(state.logs || []), logEntry(`${state.roundNumber || 1}. tur tamamlanamadı${nextRunAt ? " · sonraki tur planlandı" : ""}`)].slice(-500), nextRunAt });
+  if (failed.centralManaged) await notifyCentralRoundFinished(failed, false);
+}
+function notifyCentralRoundFinished(state, ok) {
+  const message = { futbinSyncModule: "fc-sync", type: "MODULE_ROUND_FINISHED", module: "important", runId: state.centralRunId, ok, error: ok ? null : state.status };
+  const directOrchestrator = globalThis.FutbinSyncCentralOrchestrator;
+  if (typeof directOrchestrator?.moduleRoundFinished === "function") {
+    void directOrchestrator.moduleRoundFinished(message);
+    return;
+  }
+  chrome.runtime.sendMessage(message).catch(() => {
+    // Merkezi background yeniden başlatılmış olabilir; stale olay merkezi runId ile yok sayılır.
+  });
 }
 async function ensureAlarm() { const state = await getState(); if (await isFcSyncEnabled() && state.running && !isFinishedState(state) && state.nextRunAt > Date.now()) await chrome.alarms.create(ALARM, { when: state.nextRunAt }); else await chrome.alarms.clear(ALARM); }
 async function apiRequest(base, path, options = {}) {

@@ -6,6 +6,66 @@ let DEFAULT_WAIT_MS = 5000;
 
 const modules = [
   {
+    id: "latest",
+    title: "Latest Player Sync",
+    color: "#55a7ff",
+    icon: "zap",
+    operations: ["coin-cards"],
+    stateKey: "latestSyncState",
+    logsKey: "latestSyncLogs",
+    errorsKey: "latestSyncErrors",
+    snapshotState(response) {
+      const root = response?.latestSyncState || {};
+      return root.runs?.["coin-cards"] || root;
+    },
+    logs(response, state) {
+      const storedLogs = response?.latestSyncLogs || [];
+      return storedLogs.length ? storedLogs : state?.logs || [];
+    },
+    errors(response) {
+      return response?.latestSyncErrors || [];
+    },
+    metrics(state) {
+      return [
+        ["YENİ KAYIT", latestInsertedCount(state)],
+        ["GÜNCELLENEN", latestUpdatedCount(state)]
+      ];
+    },
+    progress: queueProgress,
+    extra: { label: "Aç", title: "Aktif URL'yi aç", icon: "external" },
+    hasManualControl: true
+  },
+  {
+    id: "pricerange",
+    title: "Price Range Sync",
+    color: "#f3bd53",
+    stateKey: "priceRangeSyncState",
+    logsKey: "priceRangeSyncLogs",
+    errorsKey: "priceRangeSyncErrors",
+    snapshotState(response) {
+      return response?.priceRangeSyncState || {};
+    },
+    logs(response, state) {
+      return response?.priceRangeSyncLogs || state?.logs || [];
+    },
+    errors(response) {
+      return response?.priceRangeSyncErrors || [];
+    },
+    metrics(state) {
+      return [
+        ["SAYFA", num(state.currentPage)],
+        ["PARSED", num(state.rowsParsed)],
+        [`${num(state.minimumRatio) || 3}X EŞİK`, num(state.ratioQualified)],
+        ["DETAY OK", num(state.detailPricesLoaded)],
+        ["API", num(state.apiProcessed)],
+        ["KAYDEDİLEN", num(state.apiInserted) + num(state.apiUpdated)]
+      ];
+    },
+    progress: priceRangeProgress,
+    extra: { label: "Aç", title: "Futbin Price Range sayfasını aç", icon: "external" },
+    hasManualControl: true
+  },
+  {
     id: "important",
     title: "Important Players",
     color: "#23c7a6",
@@ -34,79 +94,8 @@ const modules = [
     progress(state) {
       return state.totalPages ? (num(state.currentPage) / num(state.totalPages)) * 100 : state.running ? 12 : 0;
     },
-    extra: { label: "Aç", title: "Aktif Futbin URL'yi aç", icon: "external" }
-  },
-  {
-    id: "latest",
-    title: "Latest Player Sync",
-    color: "#55a7ff",
-    icon: "zap",
-    operations: ["coin-cards"],
-    stateKey: "latestSyncState",
-    logsKey: "latestSyncLogs",
-    errorsKey: "latestSyncErrors",
-    snapshotState(response) {
-      const root = response?.latestSyncState || {};
-      return root.runs?.["coin-cards"] || root;
-    },
-    logs(response, state) {
-      const storedLogs = response?.latestSyncLogs || [];
-      return storedLogs.length ? storedLogs : state?.logs || [];
-    },
-    errors(response) {
-      return response?.latestSyncErrors || [];
-    },
-    metrics(state) {
-      return [
-        ["YENİ KAYIT", latestInsertedCount(state)],
-        ["GÜNCELLENEN", latestUpdatedCount(state)]
-      ];
-    },
-    progress: queueProgress,
-    extra: { label: "Aç", title: "Aktif URL'yi aç", icon: "external" }
-  },
-  {
-    id: "pricerange",
-    title: "Price Range Sync",
-    color: "#f3bd53",
-    stateKey: "priceRangeSyncState",
-    logsKey: "priceRangeSyncLogs",
-    errorsKey: "priceRangeSyncErrors",
-    snapshotState(response) {
-      return response?.priceRangeSyncState || {};
-    },
-    logs(response, state) {
-      return response?.priceRangeSyncLogs || state?.logs || [];
-    },
-    errors(response) {
-      return response?.priceRangeSyncErrors || [];
-    },
-    metrics(state) {
-      return [
-        ["SAYFA", num(state.currentPage)],
-        ["OKUNAN", num(state.pagesRead)],
-        ["PARSED", num(state.rowsParsed)],
-        ["ARALIKTA", num(state.matchingRecords)],
-        [`${num(state.minimumRatio) || 3}X EŞİK`, num(state.ratioQualified)],
-        ["ORAN ATL.", num(state.ratioSkipped)],
-        ["BUGÜN OYUNCU", num(state.detailQueue?.length)],
-        ["DETAY OKUNAN", num(state.detailPagesRead)],
-        ["BAŞARILI", num(state.detailSuccessful)],
-        ["DETAY OK", num(state.detailPricesLoaded)],
-        ["FİYAT EKSİK", num(state.detailPricesMissing)],
-        ["KALAN", num(state.detailRemaining)],
-        ["ESKİ", num(state.oldRecordsSkipped)],
-        ["API", num(state.apiProcessed)],
-        ["EKLENEN", num(state.apiInserted)],
-        ["GÜNCELLENEN", num(state.apiUpdated)],
-        ["BULUNAMADI", num(state.apiNotFound)],
-        ["BAŞARISIZ", num(state.apiFailed)]
-      ];
-    },
-    progress: priceRangeProgress,
-    extra: { label: "Aç", title: "Futbin Price Range sayfasını aç", icon: "external" },
-    hasManualControl: true,
-    independent: true
+    extra: { label: "Aç", title: "Aktif Futbin URL'yi aç", icon: "external" },
+    hasManualControl: true
   },
 ];
 
@@ -116,7 +105,10 @@ const dashboard = document.querySelector("#dashboard");
 const template = document.querySelector("#panelTemplate");
 const globalStart = document.querySelector("#global-start");
 const globalTerminate = document.querySelector("#global-terminate");
+const centralStatus = document.querySelector("#central-status");
 let centralSyncEnabled = false;
+let centralActiveModule = null;
+let centralRound = 0;
 
 init();
 setInterval(renderCountdowns, 1000);
@@ -124,7 +116,7 @@ setInterval(refreshAll, 2500);
 
 chrome.storage.onChanged.addListener((changes, area) => {
   if (area !== "local") return;
-  if (changes.fcSyncEnabled) refreshCentralControl();
+  if (changes.fcSyncEnabled || changes.fcSyncOrchestratorState) refreshCentralControl();
   const keys = modules.flatMap((module) => [module.stateKey, module.logsKey, module.errorsKey].filter(Boolean));
   if (keys.some((key) => changes[key])) refreshAll();
 });
@@ -189,7 +181,7 @@ async function refreshModule(module) {
 }
 
 async function clearModule(module) {
-  if (centralSyncEnabled && !module.independent) {
+  if (centralSyncEnabled) {
     showToast("FC Sync çalışırken panel verisi temizlenemez. Önce merkezi denetimden tamamen sonlandırın.");
     return;
   }
@@ -200,15 +192,28 @@ async function refreshCentralControl() {
   try {
     const response = await chrome.runtime.sendMessage({ futbinSyncModule: "fc-sync", type: "GET_SNAPSHOT" });
     centralSyncEnabled = Boolean(response?.enabled);
+    centralActiveModule = response?.orchestrator?.activeModule || null;
+    centralRound = Number(response?.orchestrator?.round) || 0;
+    centralStatus.textContent = centralSyncEnabled
+      ? `${centralRound}. tur · ${moduleTitle(centralActiveModule)}`
+      : "Hazır";
     globalStart.disabled = centralSyncEnabled;
     globalTerminate.disabled = !centralSyncEnabled;
     globalStart.setAttribute("aria-pressed", String(centralSyncEnabled));
     globalTerminate.setAttribute("aria-pressed", String(!centralSyncEnabled));
+    modules.forEach((module) => {
+      const snapshot = latestSnapshots.get(module.id);
+      if (snapshot) renderModule(module, snapshot);
+    });
   } catch (error) {
     globalStart.disabled = true;
     globalTerminate.disabled = true;
     showToast(`Merkezi denetim kullanılamıyor: ${error.message || error}`);
   }
+}
+
+function moduleTitle(id) {
+  return modules.find((module) => module.id === id)?.title || "Başlatma bekleniyor";
 }
 
 async function runCentralSync(type) {
@@ -260,6 +265,10 @@ async function extraAction(module) {
 }
 
 async function action(module, type, payload = {}) {
+  if (centralSyncEnabled && type !== "GET_SNAPSHOT") {
+    showToast("FC Sync çalışırken tekil modül denetimleri kapalıdır.");
+    return;
+  }
   try {
     const response = await send(module, type, payload);
     if (!response?.ok) throw new Error(response?.error || "İşlem başarısız.");
@@ -280,12 +289,21 @@ function renderModule(module, response) {
   const logs = module.logs(response, state);
   const errors = module.errors(response, state);
   panel.dataset.running = state.running ? "true" : "false";
+  const active = centralSyncEnabled
+    ? centralActiveModule === module.id
+    : Boolean(state.running && !state.waitingForNextRun);
+  panel.dataset.active = String(active);
+  panel.title = centralSyncEnabled && centralActiveModule === module.id
+    ? `${centralRound}. turda çalışıyor`
+    : "";
   if (module.hasManualControl) {
     const start = panel.querySelector(".module-start");
     const stop = panel.querySelector(".module-stop");
-    const active = Boolean(state.running || state.waitingForNextRun || state.nextRunAt);
-    start.hidden = active;
-    stop.hidden = !active;
+    const standaloneActive = Boolean(state.running || state.waitingForNextRun || state.nextRunAt);
+    start.hidden = standaloneActive;
+    stop.hidden = centralSyncEnabled || !standaloneActive;
+    start.disabled = centralSyncEnabled;
+    stop.disabled = centralSyncEnabled;
   }
 
   const challengeUrl = state.awaitingFutbinVerification ? safeFutbinUrl(state.futbinChallengeUrl) : "";
@@ -314,7 +332,7 @@ function renderLines(container, entries, emptyText, isError = false, moduleId = 
     return;
   }
   const sourceRows = (Array.isArray(entries) ? entries : []).slice(-70);
-  const rows = moduleId === "pricerange" && !isError ? sourceRows : sourceRows.reverse();
+  const rows = sourceRows;
   if (!rows.length) {
     container.innerHTML = `<div class="empty">${escapeHtml(emptyText)}</div>`;
     return;
@@ -340,6 +358,7 @@ function renderLines(container, entries, emptyText, isError = false, moduleId = 
     }
     return `<div class="${className}"><time>${escapeHtml(at)}</time><span>${escapeHtml(message)}</span></div>`;
   }).join("");
+  scrollLogsToBottom(container);
 }
 
 function priceRangeDetailLogLine(entry, futbinUrl) {
@@ -464,7 +483,7 @@ function errorValue(message, key) {
 }
 
 function renderLatestLines(container, entries, emptyText) {
-  const rows = latestDisplayEntries(entries).slice(-70).reverse();
+  const rows = latestDisplayEntries(entries).slice(-70);
   if (!rows.length) {
     container.innerHTML = `<div class="empty">${escapeHtml(emptyText)}</div>`;
     return;
@@ -490,6 +509,13 @@ function renderLatestLines(container, entries, emptyText) {
     if (!activeKeys.has(key)) line.remove();
   });
   container.replaceChildren(fragment);
+  scrollLogsToBottom(container);
+}
+
+function scrollLogsToBottom(container) {
+  requestAnimationFrame(() => {
+    container.scrollTop = container.scrollHeight;
+  });
 }
 
 function latestDisplayEntries(entries) {

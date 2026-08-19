@@ -16,6 +16,7 @@ const MAX_LOGS = 150;
 const MAX_ERRORS = 50;
 const TARGET_DOM_WAIT_MS = 60_000;
 const API_CONFIG = globalThis.FutbinSyncApiConfig;
+const FC_SYNC_ENABLED_KEY = "fcSyncEnabled";
 
 let runToken = 0;
 let activeController = null;
@@ -29,6 +30,9 @@ const pendingDelays = new Map();
 const emptyState = {
   running: false,
   userStarted: false,
+  runOnce: false,
+  centralManaged: false,
+  centralRunId: null,
   waitingForNextRun: false,
   status: "Hazır",
   error: null,
@@ -86,6 +90,13 @@ chrome.runtime.onInstalled.addListener(async () => {
 chrome.runtime.onStartup.addListener(async () => {
   await API_CONFIG.ready;
   const state = await getState();
+  if (state.runOnce || state.centralManaged) {
+    await chrome.alarms.clear(LOOP_ALARM);
+    if (state.running || state.waitingForNextRun) {
+      await writeState({ ...state, running: false, userStarted: false, waitingForNextRun: false, nextRunAt: null, status: "Hazır" });
+    }
+    return;
+  }
   if (!state.userStarted) return;
   if (state.running) {
     const token = ++runToken;
@@ -112,7 +123,7 @@ chrome.alarms.onAlarm.addListener((alarm) => {
 globalThis.FutbinSyncModuleControls = globalThis.FutbinSyncModuleControls || {};
 globalThis.FutbinSyncModuleControls[MODULE] = {
   getSnapshot: async () => getSnapshot(),
-  start: async () => startSync(),
+  start: async (options = {}) => startSync(options),
   stop: async () => stopSync(),
   clear: async () => clearSync()
 };
@@ -120,7 +131,7 @@ globalThis.FutbinSyncModuleControls[MODULE] = {
 async function handleMessage(message) {
   switch (message.type) {
     case "GET_SNAPSHOT": return { ok: true, ...(await getSnapshot()) };
-    case "START_SYNC": return startSync();
+    case "START_SYNC": return startSync({ runOnce: true });
     case "STOP_SYNC": return stopSync();
     case "CLEAR_SYNC": return clearSync();
     default: return { ok: false, error: "Bilinmeyen Price Range Sync mesajı." };
@@ -164,13 +175,22 @@ function enqueueStateWrite(task) {
   return next;
 }
 
-async function startSync() {
+async function startSync({ runOnce = false, centralManaged = false, centralRunId = null } = {}) {
   await API_CONFIG.ready;
+  if (!centralManaged && await isCentralSyncEnabled()) {
+    return { ok: false, error: "Merkezi sync çalışırken tekil Price Range Sync başlatılamaz." };
+  }
   const state = await getState();
   if (state.running) return { ok: true, state, alreadyRunning: true };
   await chrome.alarms.clear(LOOP_ALARM);
   const token = ++runToken;
-  const started = await freshCycleState({ userStarted: true, status: "Starting..." });
+  const started = await freshCycleState({
+    userStarted: !runOnce,
+    runOnce,
+    centralManaged,
+    centralRunId,
+    status: "Starting..."
+  });
   void runCycle(token).catch((error) => handleCycleFailure(error, token));
   return { ok: true, state: started };
 }
@@ -179,9 +199,9 @@ async function startScheduledCycle() {
   await API_CONFIG.ready;
   await chrome.alarms.clear(LOOP_ALARM);
   const previous = await getState();
-  if (!previous.userStarted || previous.running) return;
+  if (!previous.userStarted || previous.running || previous.runOnce || previous.centralManaged) return;
   const token = ++runToken;
-  await freshCycleState({ userStarted: true, status: "Yeni saatlik Price Range taraması başlıyor" });
+  await freshCycleState({ userStarted: true, runOnce: false, centralManaged: false, centralRunId: null, status: "Yeni saatlik Price Range taraması başlıyor" });
   void runCycle(token).catch((error) => handleCycleFailure(error, token));
 }
 
@@ -216,16 +236,19 @@ async function stopSync() {
   cancelTabWait = null;
   cancelPendingDelays();
   await chrome.alarms.clear(LOOP_ALARM);
-  if (activeTabId) await chrome.tabs.remove(activeTabId).catch(() => {});
+  if (activeTabId) await closePriceRangeTab(activeTabId);
   activeTabId = null;
-  if (detailTabId) await chrome.tabs.remove(detailTabId).catch(() => {});
+  if (detailTabId) await closePriceRangeTab(detailTabId);
   detailTabId = null;
   const state = await patchState({
     running: false,
     userStarted: false,
+    runOnce: false,
+    centralManaged: false,
+    centralRunId: null,
     waitingForNextRun: false,
     nextRunAt: null,
-    status: "Finished",
+    status: "Hazır",
     error: null,
     awaitingFutbinVerification: false,
     futbinChallengeTabId: null,
@@ -395,7 +418,7 @@ async function fetchViaTab(url, token, targetReady = looksLikePriceRangeHtml) {
     return html;
   } finally {
     if (activeTabId === tab.id) activeTabId = null;
-    await chrome.tabs.remove(tab.id).catch(() => {});
+    await closePriceRangeTab(tab.id);
     lastExternalRequestCompletedAt = Date.now();
   }
 }
@@ -814,7 +837,7 @@ async function processRecords(records, token) {
       await upsertPlayerLog(record, "failed", `Failed · ${job.rating || "—"} · ${job.playerName || job.futbinPlayerId}`, { playerKey, url: job.url, error: error.message || String(error) });
     } finally {
       await patchState({ detailRemaining: Math.max(0, detailQueue.length - index - 1) });
-      if (detailTabId) await chrome.tabs.remove(detailTabId).catch(() => {});
+      if (detailTabId) await closePriceRangeTab(detailTabId);
       detailTabId = null;
       await patchState({ tabId: null, currentUrl: null });
     }
@@ -1018,15 +1041,18 @@ async function apiRequest(endpoint, options, token) {
 
 async function finishCycle(token, { status, error = null } = {}) {
   if (!await isActive(token)) return;
-  if (detailTabId) await chrome.tabs.remove(detailTabId).catch(() => {});
+  if (detailTabId) await closePriceRangeTab(detailTabId);
   detailTabId = null;
-  const nextRunAt = Date.now() + LOOP_DELAY_MS;
+  if (activeTabId) await closePriceRangeTab(activeTabId);
+  activeTabId = null;
   const current = await getState();
+  const oneShot = Boolean(current.runOnce || current.centralManaged);
+  const nextRunAt = oneShot ? null : Date.now() + LOOP_DELAY_MS;
   const completed = await writeState({
     ...current,
     running: false,
-    userStarted: true,
-    waitingForNextRun: true,
+    userStarted: !oneShot,
+    waitingForNextRun: !oneShot,
     nextRunAt,
     completedAt: Date.now(),
     status: status || "Finished",
@@ -1041,8 +1067,9 @@ async function finishCycle(token, { status, error = null } = {}) {
     futbinChallengeDetectedAt: null
   });
   await chrome.alarms.clear(LOOP_ALARM);
-  await chrome.alarms.create(LOOP_ALARM, { when: nextRunAt });
-  await appendLog(`${completed.status} · sonraki tarama 1 saat sonra`, "cycle-finished", { nextRunAt });
+  if (!oneShot) await chrome.alarms.create(LOOP_ALARM, { when: nextRunAt });
+  await appendLog(oneShot ? `${completed.status} · tek tur tamamlandı` : `${completed.status} · sonraki tarama 1 saat sonra`, "cycle-finished", { nextRunAt });
+  if (completed.centralManaged) await notifyCentralRoundFinished(completed, !error);
 }
 
 async function handleCycleFailure(error, token) {
@@ -1054,6 +1081,44 @@ async function handleCycleFailure(error, token) {
 
 async function isActive(token) {
   return token === runToken && (await getState()).running;
+}
+
+async function closePriceRangeTab(tabId) {
+  if (!Number.isInteger(Number(tabId))) return true;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try { await chrome.tabs.remove(tabId); } catch { /* Sekme zaten kapalı olabilir. */ }
+    try {
+      await chrome.tabs.get(tabId);
+    } catch {
+      return true;
+    }
+    if (attempt < 2) await new Promise((resolve) => setTimeout(resolve, 120));
+  }
+  await appendLog(`Çalışma sekmesi kapatılamadı · tab ${tabId}`, "tab-close-failed", { tabId });
+  return false;
+}
+
+async function isCentralSyncEnabled() {
+  return Boolean((await chrome.storage.local.get(FC_SYNC_ENABLED_KEY))[FC_SYNC_ENABLED_KEY]);
+}
+
+function notifyCentralRoundFinished(state, ok) {
+  const message = {
+    futbinSyncModule: "fc-sync",
+    type: "MODULE_ROUND_FINISHED",
+    module: MODULE,
+    runId: state.centralRunId,
+    ok,
+    error: state.error || null
+  };
+  const directOrchestrator = globalThis.FutbinSyncCentralOrchestrator;
+  if (typeof directOrchestrator?.moduleRoundFinished === "function") {
+    void directOrchestrator.moduleRoundFinished(message);
+    return;
+  }
+  chrome.runtime.sendMessage(message).catch(() => {
+    // Merkezi background yeniden başlatılmış olabilir; stale olay merkezi runId ile yok sayılır.
+  });
 }
 
 function assertActive(token) {

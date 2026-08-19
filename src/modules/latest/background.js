@@ -94,6 +94,9 @@ const emptyState = {
   skippedPlayers: 0,
   clubSaveResults: {},
   logs: [],
+  runOnce: false,
+  centralManaged: false,
+  centralRunId: null,
   nextRunAt: null,
   runStartedAt: null,
   status: "Hazır",
@@ -121,8 +124,8 @@ chrome.runtime.onStartup.addListener(async () => {
     await pauseSync();
     return;
   }
-  syncLog("FC Sync etkin; Latest otomatik çalışma kontrol ediliyor");
-  await ensureLatestAutoRun("browser-startup");
+  // Merkezi orchestrator aktif turu yeniden başlatır; modül kendi başına tur başlatmaz.
+  syncLog("FC Sync etkin; Latest başlangıcı merkezi orchestrator'a bırakıldı");
 });
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
@@ -143,9 +146,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 globalThis.FutbinSyncModuleControls = globalThis.FutbinSyncModuleControls || {};
 globalThis.FutbinSyncModuleControls.latest = {
   getSnapshot: async () => ({ ok: true, ...(await chrome.storage.local.get([STATE_KEY, RECORDS_KEY, LOGS_KEY, ERRORS_KEY])) }),
-  start: async ({ apiBaseUrl, waitMs, operations } = {}) => {
-    await chrome.storage.local.set({ [AUTO_RUN_KEY]: true });
-    return startParallelSync(apiBaseUrl, waitMs, operations || EXTENSION_OPERATIONS);
+  start: async ({ apiBaseUrl, waitMs, operations, runOnce = false, centralManaged = false, centralRunId = null } = {}) => {
+    await chrome.storage.local.set({ [AUTO_RUN_KEY]: !runOnce });
+    return startParallelSync(apiBaseUrl, waitMs, operations || EXTENSION_OPERATIONS, { runOnce, centralManaged, centralRunId });
   },
   stop: async () => {
     await chrome.storage.local.set({ [AUTO_RUN_KEY]: false });
@@ -156,8 +159,9 @@ globalThis.FutbinSyncModuleControls.latest = {
 async function handleMessage(message, sender) {
   switch (message?.type) {
     case "START_SYNC":
-      await chrome.storage.local.set({ [AUTO_RUN_KEY]: true });
-      return startParallelSync(message.apiBaseUrl, message.waitMs, message.operations);
+      if (await isFcSyncEnabled()) return { ok: false, error: "Merkezi sync çalışırken tekil Latest Player Sync başlatılamaz." };
+      await chrome.storage.local.set({ [AUTO_RUN_KEY]: false });
+      return startParallelSync(message.apiBaseUrl, message.waitMs, message.operations, { runOnce: true });
     case "RESUME_SYNC":
       return resumePausedSync();
     case "STOP_SYNC":
@@ -169,11 +173,11 @@ async function handleMessage(message, sender) {
         const current = await getState();
         for (const run of Object.values(current.runs || {})) {
           if (run?.tabId) {
-            try { await chrome.tabs.remove(run.tabId); } catch { /* Sekme zaten kapanmış olabilir. */ }
+            await closeRunnerTab(run.tabId, run);
           }
         }
         if (current.tabId) {
-          try { await chrome.tabs.remove(current.tabId); } catch { /* Legacy sekme zaten kapanmış olabilir. */ }
+            await closeRunnerTab(current.tabId, current);
         }
       }
       await setState({ ...emptyState, apiBaseUrl: message.apiBaseUrl || emptyState.apiBaseUrl });
@@ -238,7 +242,10 @@ async function ensureLatestAutoRun(reason) {
   );
 }
 
-async function startParallelSync(rawApiBaseUrl, rawWaitMs, rawOperations) {
+async function startParallelSync(rawApiBaseUrl, rawWaitMs, rawOperations, runOptions = {}) {
+  if (!runOptions.centralManaged && await isFcSyncEnabled()) {
+    return { ok: false, error: "Merkezi sync çalışırken tekil Latest Player Sync başlatılamaz." };
+  }
   const token = ++runToken;
   const operations = normalizeOperations(rawOperations);
   if (!operations.length) throw new Error("En az bir işlem seçilmelidir.");
@@ -247,7 +254,7 @@ async function startParallelSync(rawApiBaseUrl, rawWaitMs, rawOperations) {
     try {
       const run = await getState(runnerId);
       const nextRunCount = (run.runCount || 0) + 1;
-      return await startFreshSync(rawApiBaseUrl, rawWaitMs, RUNNER_OPERATIONS[runnerId], nextRunCount, runnerId, false, token);
+      return await startFreshSync(rawApiBaseUrl, rawWaitMs, RUNNER_OPERATIONS[runnerId], nextRunCount, runnerId, false, token, runOptions);
     } catch (error) {
       const run = await getState(runnerId);
       await failSync(error.message || String(error), run);
@@ -258,8 +265,7 @@ async function startParallelSync(rawApiBaseUrl, rawWaitMs, rawOperations) {
   return { ok: true, state: await getState(), results };
 }
 
-async function startFreshSync(rawApiBaseUrl, rawWaitMs, rawOperations, runCount = 0, rawRunnerId = null, isScheduledStart = false, token = runToken) {
-  if (!await isFcSyncEnabled()) return { ok: false, stopped: true, state: await getState(rawRunnerId || EXTENSION_RUNNER_ID) };
+async function startFreshSync(rawApiBaseUrl, rawWaitMs, rawOperations, runCount = 0, rawRunnerId = null, isScheduledStart = false, token = runToken, runOptions = {}) {
   const operations = normalizeOperations(rawOperations);
   if (!operations.length) throw new Error("En az bir işlem seçilmelidir.");
   const runnerId = rawRunnerId || operationRunnerId(operations[0]);
@@ -311,7 +317,7 @@ async function startFreshSync(rawApiBaseUrl, rawWaitMs, rawOperations, runCount 
   await chrome.alarms.clear(syncLoopAlarmName(runnerId));
 
   if (previous.tabId) {
-    try { await chrome.tabs.remove(previous.tabId); } catch { /* Eski sekme zaten kapanmış olabilir. */ }
+    await closeRunnerTab(previous.tabId, previous);
   }
   if (queue.length === 0) {
     const state = {
@@ -322,10 +328,14 @@ async function startFreshSync(rawApiBaseUrl, rawWaitMs, rawOperations, runCount 
       operations,
       runCount,
       runStartedAt,
+      runOnce: Boolean(runOptions.runOnce),
+      centralManaged: Boolean(runOptions.centralManaged),
+      centralRunId: runOptions.centralRunId ?? null,
       status: "Seçilen işlemler için bekleyen iş yok",
       updatedAt: Date.now()
     };
     await setState(state);
+    if (state.centralManaged) await notifyCentralRoundFinished(state, true);
     return { ok: true, state };
   }
 
@@ -340,7 +350,10 @@ async function startFreshSync(rawApiBaseUrl, rawWaitMs, rawOperations, runCount 
     ...emptyState,
     runnerId,
     running: true,
-    userStarted: true,
+    userStarted: !runOptions.runOnce,
+    runOnce: Boolean(runOptions.runOnce),
+    centralManaged: Boolean(runOptions.centralManaged),
+    centralRunId: runOptions.centralRunId ?? null,
     queue,
     operations,
     lookups,
@@ -548,6 +561,9 @@ async function pauseSync(rawOperations = null) {
       ...state,
       running: false,
       userStarted: false,
+      runOnce: false,
+      centralManaged: false,
+      centralRunId: null,
       queue: [],
       currentJobIndex: -1,
       currentPage: 0,
@@ -565,13 +581,13 @@ async function pauseSync(rawOperations = null) {
       futbinChallengeTabId: null,
       futbinChallengeUrl: null,
       nextRunAt: null,
-      status: FINISHED_STATUS,
+      status: "Hazır",
       error: null,
       updatedAt: Date.now()
     };
     await setState(stopped);
     if (state.tabId) {
-      try { await chrome.tabs.remove(state.tabId); } catch { /* Sekme zaten kapanmış olabilir. */ }
+      await closeRunnerTab(state.tabId, state);
     }
   }
   return { ok: true, state: await getState() };
@@ -723,9 +739,24 @@ async function closeRunnerTab(tabId, stateHint = null) {
   controlledTabCloseIds.add(tabId);
   const state = stateHint?.runnerId ? stateHint : await getStateByTabId(tabId);
   if (state?.runnerId) await appendLatestTabLog(state, "Futbin sekmesi kapatılıyor", "tab-closing", { tabId });
-  try { await chrome.tabs.remove(tabId); } catch { /* Sekme zaten kapanmış olabilir. */ }
-  if (state?.runnerId) await appendLatestTabLog(state, "Futbin sekmesi kapatıldı", "tab-closed", { tabId });
+  const closed = await closeOwnedTab(tabId);
+  if (state?.runnerId) await appendLatestTabLog(state, closed ? "Futbin sekmesi kapatıldı" : "Futbin sekmesi kapatılamadı", closed ? "tab-closed" : "tab-close-failed", { tabId });
   setTimeout(() => controlledTabCloseIds.delete(tabId), 30000);
+  return closed;
+}
+
+async function closeOwnedTab(tabId) {
+  if (!Number.isInteger(Number(tabId))) return true;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try { await chrome.tabs.remove(tabId); } catch { /* Sekme zaten kapalı olabilir. */ }
+    try {
+      await chrome.tabs.get(tabId);
+    } catch {
+      return true;
+    }
+    if (attempt < 2) await new Promise((resolve) => setTimeout(resolve, 120));
+  }
+  return false;
 }
 
 async function createRunnerTab(operations = []) {
@@ -1997,7 +2028,8 @@ async function failSync(error, currentState = null) {
   await chrome.alarms.clear(jobAdvanceAlarmName(state));
   await chrome.alarms.clear(syncLoopAlarmName(state));
   const stored = await chrome.storage.local.get(AUTO_RUN_KEY);
-  const autoRunEnabled = await isFcSyncEnabled() && stored[AUTO_RUN_KEY] !== false;
+  const oneShot = Boolean(state.runOnce || state.centralManaged);
+  const autoRunEnabled = !oneShot && await isFcSyncEnabled() && stored[AUTO_RUN_KEY] !== false;
   const nextRunAt = autoRunEnabled ? Date.now() + SYNC_LOOP_DELAY_MS : null;
   const failed = {
     ...state,
@@ -2015,6 +2047,7 @@ async function failSync(error, currentState = null) {
   await setState(failed);
   await closeRunnerTab(state.tabId, state);
   if (autoRunEnabled) await scheduleLoopAlarm(failed);
+  if (failed.centralManaged) await notifyCentralRoundFinished(failed, false);
 }
 
 async function apiRequest(apiBaseUrl, endpoint, options = {}) {
@@ -2819,11 +2852,12 @@ async function scheduleNextLoop(state, totalSaved, totalSkipped, clubSaveResults
     skipped: Number(totalSkipped) || 0
   });
 
-  const nextRunAt = Date.now() + SYNC_LOOP_DELAY_MS;
+  const oneShot = Boolean(state.runOnce || state.centralManaged);
+  const nextRunAt = oneShot ? null : Date.now() + SYNC_LOOP_DELAY_MS;
   const waiting = {
     ...state,
     running: false,
-    userStarted: true,
+    userStarted: !oneShot,
     queue: [],
     currentJobIndex: -1,
     currentPage: 0,
@@ -2842,15 +2876,18 @@ async function scheduleNextLoop(state, totalSaved, totalSkipped, clubSaveResults
     pagesSucceeded: 0,
     failedPages: [],
     nextRunAt,
-    status: "Waiting for next synchronization...",
+    status: oneShot ? FINISHED_STATUS : "Waiting for next synchronization...",
     updatedAt: Date.now()
   };
   await setState(waiting);
   await closeRunnerTab(state.tabId, state);
-  await scheduleLoopAlarm(waiting);
-  startImportantAfterLatestCompletion().catch((error) => {
-    syncError("Latest sonrası Important Players başlatılamadı", error);
-  });
+  if (!oneShot) {
+    await scheduleLoopAlarm(waiting);
+    startImportantAfterLatestCompletion().catch((error) => {
+      syncError("Latest sonrası Important Players başlatılamadı", error);
+    });
+  }
+  if (waiting.centralManaged) await notifyCentralRoundFinished(waiting, true);
   return { ok: true, action: "COMPLETED", state: waiting };
 }
 
@@ -2912,7 +2949,26 @@ function sameRun(expected, current) {
 
 async function isActiveRun(expected) {
   const current = await getState(expected?.runnerId);
-  return Boolean(await isFcSyncEnabled() && current.running && !isFinishedState(current) && sameRun(expected, current));
+  return Boolean(current.running && !isFinishedState(current) && sameRun(expected, current));
+}
+
+function notifyCentralRoundFinished(state, ok) {
+  const message = {
+    futbinSyncModule: "fc-sync",
+    type: "MODULE_ROUND_FINISHED",
+    module: "latest",
+    runId: state.centralRunId,
+    ok,
+    error: ok ? null : state.error || state.status
+  };
+  const directOrchestrator = globalThis.FutbinSyncCentralOrchestrator;
+  if (typeof directOrchestrator?.moduleRoundFinished === "function") {
+    void directOrchestrator.moduleRoundFinished(message);
+    return;
+  }
+  chrome.runtime.sendMessage(message).catch(() => {
+    // Merkezi background yeniden başlatılmış olabilir; stale olay merkezi runId ile yok sayılır.
+  });
 }
 
 function futbinRequestDelayMs(value) {
