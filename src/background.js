@@ -1,6 +1,7 @@
 import "./config/api.js";
 import "./modules/important/background.js";
 import "./modules/latest/background.js";
+import "./modules/pricerange/background.js";
 
 const FC_SYNC_ENABLED_KEY = "fcSyncEnabled";
 

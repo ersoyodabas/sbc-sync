@@ -65,6 +65,49 @@ const modules = [
     progress: queueProgress,
     extra: { label: "Aç", title: "Aktif URL'yi aç", icon: "external" }
   },
+  {
+    id: "pricerange",
+    title: "Price Range Sync",
+    color: "#f3bd53",
+    stateKey: "priceRangeSyncState",
+    logsKey: "priceRangeSyncLogs",
+    errorsKey: "priceRangeSyncErrors",
+    snapshotState(response) {
+      return response?.priceRangeSyncState || {};
+    },
+    logs(response, state) {
+      return response?.priceRangeSyncLogs || state?.logs || [];
+    },
+    errors(response) {
+      return response?.priceRangeSyncErrors || [];
+    },
+    metrics(state) {
+      return [
+        ["SAYFA", num(state.currentPage)],
+        ["OKUNAN", num(state.pagesRead)],
+        ["PARSED", num(state.rowsParsed)],
+        ["ARALIKTA", num(state.matchingRecords)],
+        [`${num(state.minimumRatio) || 3}X EŞİK`, num(state.ratioQualified)],
+        ["ORAN ATL.", num(state.ratioSkipped)],
+        ["BUGÜN OYUNCU", num(state.detailQueue?.length)],
+        ["DETAY OKUNAN", num(state.detailPagesRead)],
+        ["BAŞARILI", num(state.detailSuccessful)],
+        ["DETAY OK", num(state.detailPricesLoaded)],
+        ["FİYAT EKSİK", num(state.detailPricesMissing)],
+        ["KALAN", num(state.detailRemaining)],
+        ["ESKİ", num(state.oldRecordsSkipped)],
+        ["API", num(state.apiProcessed)],
+        ["EKLENEN", num(state.apiInserted)],
+        ["GÜNCELLENEN", num(state.apiUpdated)],
+        ["BULUNAMADI", num(state.apiNotFound)],
+        ["BAŞARISIZ", num(state.apiFailed)]
+      ];
+    },
+    progress: priceRangeProgress,
+    extra: { label: "Aç", title: "Futbin Price Range sayfasını aç", icon: "external" },
+    hasManualControl: true,
+    independent: true
+  },
 ];
 
 const panels = new Map();
@@ -112,14 +155,20 @@ function mountPanel(module) {
 
   const clear = panel.querySelector(".clear");
   const extra = panel.querySelector(".extra");
+  const start = panel.querySelector(".module-start");
+  const stop = panel.querySelector(".module-stop");
   clear.innerHTML = icon("trash");
   clear.title = "Panel verisini temizle";
   extra.innerHTML = icon(module.extra.icon);
   extra.title = module.extra.title;
   extra.hidden = module.hasExtra === false;
+  start.hidden = !module.hasManualControl;
+  stop.hidden = true;
 
   clear.addEventListener("click", () => clearModule(module));
   extra.addEventListener("click", () => extraAction(module));
+  start.addEventListener("click", () => action(module, "START_SYNC"));
+  stop.addEventListener("click", () => action(module, "STOP_SYNC"));
 
   dashboard.appendChild(fragment);
   panels.set(module.id, panel);
@@ -140,7 +189,7 @@ async function refreshModule(module) {
 }
 
 async function clearModule(module) {
-  if (centralSyncEnabled) {
+  if (centralSyncEnabled && !module.independent) {
     showToast("FC Sync çalışırken panel verisi temizlenemez. Önce merkezi denetimden tamamen sonlandırın.");
     return;
   }
@@ -202,6 +251,10 @@ async function extraAction(module) {
     await chrome.tabs.create({ url: "https://sbcmonster.com/coin-kartlari", active: true });
     return;
   }
+  if (module.id === "pricerange") {
+    await chrome.tabs.create({ url: "https://www.futbin.com/26/priceranges?page=1", active: true });
+    return;
+  }
   const url = state.futbinChallengeUrl || state.currentUrl || state.queue?.[state.currentJobIndex]?.url;
   if (url) await chrome.tabs.create({ url, active: true });
 }
@@ -227,6 +280,13 @@ function renderModule(module, response) {
   const logs = module.logs(response, state);
   const errors = module.errors(response, state);
   panel.dataset.running = state.running ? "true" : "false";
+  if (module.hasManualControl) {
+    const start = panel.querySelector(".module-start");
+    const stop = panel.querySelector(".module-stop");
+    const active = Boolean(state.running || state.waitingForNextRun || state.nextRunAt);
+    start.hidden = active;
+    stop.hidden = !active;
+  }
 
   const challengeUrl = state.awaitingFutbinVerification ? safeFutbinUrl(state.futbinChallengeUrl) : "";
   panel.querySelector(".status-text").textContent = [state.status || "Hazır", challengeUrl].filter(Boolean).join(" · ");
@@ -253,7 +313,8 @@ function renderLines(container, entries, emptyText, isError = false, moduleId = 
     renderLatestLines(container, entries, emptyText);
     return;
   }
-  const rows = (Array.isArray(entries) ? entries : []).slice(-70).reverse();
+  const sourceRows = (Array.isArray(entries) ? entries : []).slice(-70);
+  const rows = moduleId === "pricerange" && !isError ? sourceRows : sourceRows.reverse();
   if (!rows.length) {
     container.innerHTML = `<div class="empty">${escapeHtml(emptyText)}</div>`;
     return;
@@ -265,13 +326,60 @@ function renderLines(container, entries, emptyText, isError = false, moduleId = 
       : moduleId === "important" && isError
         ? importantErrorText(entry)
         : entryMessage(entry, isError);
-    const className = isError ? "error-line" : "log-line";
-    const futbinUrl = isError && moduleId === "important" ? importantErrorFutbinUrl(entry) : "";
+    const className = `${isError ? "error-line" : "log-line"}${moduleId === "pricerange" && entry?.ratioQualified === false ? " below-threshold" : ""}`;
+    const futbinUrl = isError && moduleId === "important"
+      ? importantErrorFutbinUrl(entry)
+      : moduleId === "pricerange" && !isError
+        ? safeFutbinUrl(entry?.url)
+        : "";
+    if (moduleId === "pricerange" && !isError && entry?.eventType === "player-detail-final") {
+      return priceRangeDetailLogLine(entry, futbinUrl);
+    }
     if (futbinUrl) {
       return `<a class="${className}" href="${escapeHtml(futbinUrl)}" target="_blank" rel="noopener noreferrer"><time>${escapeHtml(at)}</time><span>${escapeHtml(message)}</span></a>`;
     }
     return `<div class="${className}"><time>${escapeHtml(at)}</time><span>${escapeHtml(message)}</span></div>`;
   }).join("");
+}
+
+function priceRangeDetailLogLine(entry, futbinUrl) {
+  const field = (label, value, iconName, className = "") => `
+    <span class="pr-log-field ${className}">
+      <span class="pr-log-icon">${icon(iconName)}</span>
+      <span class="pr-log-label">${escapeHtml(label)}</span>
+      <strong>${escapeHtml(value)}</strong>
+    </span>`;
+  const fields = [
+    field("", entry.rating ?? "-", "card", "rating"),
+    field("", entry.playerName || entry.record?.player_name || "-", "target", "player"),
+    field("Min", dashboardPrice(entry.newMinPrice), "coin"),
+    field("Max", dashboardPrice(entry.newMaxPrice), "coin"),
+    field("PS", dashboardPrice(entry.pricePs), "coin", "ps"),
+    field("PC", dashboardPrice(entry.pricePc), "coin", "pc"),
+    field("Max / PS", dashboardRatio(entry.ratio), "activity", "ratio")
+  ].join("");
+  const content = `<span class="pr-log-fields">${fields}</span>`;
+  const className = `log-line pricerange-detail-log${entry.ratioQualified === false ? " below-threshold" : ""}`;
+  return futbinUrl
+    ? `<a class="${className}" href="${escapeHtml(futbinUrl)}" target="_blank" rel="noopener noreferrer" title="Oyuncu detay sayfasını yeni sekmede aç">${content}</a>`
+    : `<div class="${className}">${content}</div>`;
+}
+
+function dashboardPrice(value) {
+  const number = Number(value);
+  if (!Number.isFinite(number) || number <= 0) return "-";
+  if (number >= 1_000_000) return `${compactDashboardNumber(number / 1_000_000)}M`;
+  if (number >= 1_000) return `${compactDashboardNumber(number / 1_000)}K`;
+  return String(Math.round(number));
+}
+
+function compactDashboardNumber(value) {
+  return Number(value.toFixed(2)).toLocaleString("en-US", { maximumFractionDigits: 2 });
+}
+
+function dashboardRatio(value) {
+  const number = Number(value);
+  return Number.isFinite(number) ? `${number.toFixed(2)}x` : "-";
 }
 
 function importantErrorFutbinUrl(entry) {
@@ -490,6 +598,20 @@ function queueProgress(state) {
   return state.nextRunAt ? 100 : 0;
 }
 
+function priceRangeProgress(state) {
+  if (state.nextRunAt) return 100;
+  if (!state.running) return 0;
+  if (state.stage === "player-details") {
+    const total = Math.max(num(state.detailQueue?.length), 1);
+    return 60 + (Math.min(num(state.currentDetailIndex) + 1, total) / total) * 40;
+  }
+  if (state.apiProcessed || state.matchingRecords) {
+    const total = Math.max(num(state.matchingRecords), 1);
+    return 60 + (Math.min(num(state.apiProcessed), total) / total) * 40;
+  }
+  return Math.min(55, 12 + num(state.pagesRead) * 12);
+}
+
 function entryTime(entry) {
   if (!entry || typeof entry !== "object") return "--:--";
   const value = entry?.at || entry?.requestedAt || entry?.createdAt || entry?.completedAt || entry?.updatedAt || entry?.date;
@@ -556,6 +678,7 @@ function icon(name) {
     round: `<svg viewBox="0 0 24 24"><path d="M21 12a9 9 0 1 1-3-6.7"/><path d="M21 3v6h-6"/></svg>`,
     queue: `<svg viewBox="0 0 24 24"><path d="M4 7h16"/><path d="M4 12h16"/><path d="M4 17h10"/></svg>`,
     card: `<svg viewBox="0 0 24 24"><rect x="4" y="3" width="16" height="18" rx="2"/><path d="M8 8h8"/><path d="M8 13h5"/></svg>`,
+    coin: `<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="8"/><path d="M14.5 8.5c-.6-.5-1.4-.8-2.4-.8-1.4 0-2.4.7-2.4 1.8 0 2.8 5 1.2 5 4 0 1.1-1 1.9-2.6 1.9-1.1 0-2.1-.4-2.8-1"/><path d="M12 6v12"/></svg>`,
     run: `<svg viewBox="0 0 24 24"><path d="M4 17a8 8 0 1 0 2-11"/><path d="M4 4v5h5"/></svg>`,
     step: `<svg viewBox="0 0 24 24"><path d="M5 6h4v4H5z"/><path d="M15 14h4v4h-4z"/><path d="M9 8h3a4 4 0 0 1 4 4v2"/></svg>`,
     tab: `<svg viewBox="0 0 24 24"><path d="M4 5h16v14H4z"/><path d="M4 9h16"/></svg>`,
