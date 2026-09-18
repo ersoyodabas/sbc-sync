@@ -110,6 +110,16 @@ let centralSyncEnabled = false;
 let centralActiveModule = null;
 let centralRound = 0;
 
+// Per-module "include this in #global-start" switch. Lives in
+// chrome.storage.local (not window.localStorage — background.js is a
+// service worker and has no window/localStorage at all, so this is the
+// only storage both the dashboard page and the background orchestrator can
+// actually share) as { [moduleId]: boolean }. Missing/unset === enabled, so
+// every module defaults to active without needing to pre-seed the object.
+const MODULE_ENABLED_KEY = "fcSyncModuleEnabled";
+let moduleEnabled = {};
+const isModuleEnabled = (moduleId) => moduleEnabled[moduleId] !== false;
+
 init();
 setInterval(renderCountdowns, 1000);
 setInterval(refreshAll, 2500);
@@ -117,6 +127,14 @@ setInterval(refreshAll, 2500);
 chrome.storage.onChanged.addListener((changes, area) => {
   if (area !== "local") return;
   if (changes.fcSyncEnabled || changes.fcSyncOrchestratorState) refreshCentralControl();
+  if (changes[MODULE_ENABLED_KEY]) {
+    moduleEnabled = changes[MODULE_ENABLED_KEY].newValue || {};
+    for (const module of modules) {
+      const panel = panels.get(module.id);
+      const input = panel?.querySelector(".module-enable-input");
+      if (input) input.checked = isModuleEnabled(module.id);
+    }
+  }
   const keys = modules.flatMap((module) => [module.stateKey, module.logsKey, module.errorsKey].filter(Boolean));
   if (keys.some((key) => changes[key])) refreshAll();
 });
@@ -125,13 +143,29 @@ async function init() {
   await API_CONFIG.ready;
   DEFAULT_API_BASE_URL = API_CONFIG.defaultBaseUrl();
   DEFAULT_WAIT_MS = API_CONFIG.number("WAIT_MS", 5000);
-  globalStart.addEventListener("click", () => runCentralSync("START_SYNC"));
+  const stored = await chrome.storage.local.get(MODULE_ENABLED_KEY);
+  moduleEnabled = stored[MODULE_ENABLED_KEY] || {};
+  globalStart.addEventListener("click", () => startEnabledModules());
   globalTerminate.addEventListener("click", () => runCentralSync("STOP_SYNC"));
   for (const module of modules) {
     mountPanel(module);
   }
   await refreshAll();
   await refreshCentralControl();
+}
+
+function startEnabledModules() {
+  const enabledModules = modules.map((module) => module.id).filter(isModuleEnabled);
+  if (!enabledModules.length) {
+    showToast("Başlatmak için en az bir modülü aktif bırakın.");
+    return;
+  }
+  runCentralSync("START_SYNC", { enabledModules });
+}
+
+async function setModuleEnabled(moduleId, enabled) {
+  moduleEnabled = { ...moduleEnabled, [moduleId]: enabled };
+  await chrome.storage.local.set({ [MODULE_ENABLED_KEY]: moduleEnabled });
 }
 
 function mountPanel(module) {
@@ -156,6 +190,10 @@ function mountPanel(module) {
   extra.hidden = module.hasExtra === false;
   start.hidden = !module.hasManualControl;
   stop.hidden = true;
+
+  const enableInput = panel.querySelector(".module-enable-input");
+  enableInput.checked = isModuleEnabled(module.id);
+  enableInput.addEventListener("change", () => setModuleEnabled(module.id, enableInput.checked));
 
   clear.addEventListener("click", () => clearModule(module));
   extra.addEventListener("click", () => extraAction(module));
@@ -216,7 +254,7 @@ function moduleTitle(id) {
   return modules.find((module) => module.id === id)?.title || "Başlatma bekleniyor";
 }
 
-async function runCentralSync(type) {
+async function runCentralSync(type, extra = {}) {
   globalStart.disabled = true;
   globalTerminate.disabled = true;
   try {
@@ -224,7 +262,8 @@ async function runCentralSync(type) {
       futbinSyncModule: "fc-sync",
       type,
       apiBaseUrl: DEFAULT_API_BASE_URL,
-      waitMs: DEFAULT_WAIT_MS
+      waitMs: DEFAULT_WAIT_MS,
+      ...extra
     });
     if (!response?.ok) throw new Error(response?.error || "İşlem başarısız.");
     await Promise.all([refreshAll(), refreshCentralControl()]);

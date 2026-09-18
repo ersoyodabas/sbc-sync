@@ -2,7 +2,33 @@ import { FUTBIN_CHALLENGE_MAX_WAIT_MS, futbinChallengeTimeoutError, isFutbinChal
 
 const STATE_KEY = "filteredPlayersSyncState";
 const ALARM = "filtered-players-hourly";
-const SOURCE_URL = "https://www.futbin.com/26/players?ps_price=300-45000&player_rating=82-95&sort=Player_Rating&order=asc&eUnt=1";
+const DEFAULT_MIN_RATING = 55;
+const DEFAULT_MAX_RATING = 95;
+const RATING_LOWER_BOUND = 1;
+const RATING_UPPER_BOUND = 99;
+// player_rating is parametric now (popup header inputs) instead of baked
+// into a fixed URL — this builds the same Futbin query with whichever range
+// was actually configured for the run.
+function buildSourceUrl(minRating, maxRating) {
+  return `https://www.futbin.com/27/players?ps_price=300-45000&player_rating=${minRating}-${maxRating}&sort=Player_Rating&order=asc&eUnt=1`;
+}
+function clampRating(value, fallback) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return fallback;
+  return Math.min(RATING_UPPER_BOUND, Math.max(RATING_LOWER_BOUND, Math.round(n)));
+}
+// Falls back to the last persisted range (existing state) when a caller
+// doesn't supply one — the scheduled/central/startup paths all start a run
+// without asking the user again, so they must keep using whatever range was
+// last configured from the popup rather than silently reverting to the
+// hardcoded default.
+function normalizeRatingRange(minRating, maxRating, existing = {}) {
+  let min = clampRating(minRating, clampRating(existing.minRating, DEFAULT_MIN_RATING));
+  let max = clampRating(maxRating, clampRating(existing.maxRating, DEFAULT_MAX_RATING));
+  if (min > max) [min, max] = [max, min];
+  return { minRating: min, maxRating: max };
+}
+const SOURCE_URL = buildSourceUrl(DEFAULT_MIN_RATING, DEFAULT_MAX_RATING);
 const API_CONFIG = globalThis.FutbinSyncApiConfig;
 const PAGE_BATCH_SIZE = 5;
 const REQUEST_DELAY_MS = 5000;
@@ -24,6 +50,7 @@ const FC_SYNC_ENABLED_KEY = "fcSyncEnabled";
 
 const initialState = {
   runnerId: "filtered-players", running: false, status: "Hazır", sourceUrl: SOURCE_URL,
+  minRating: DEFAULT_MIN_RATING, maxRating: DEFAULT_MAX_RATING,
   apiBaseUrl: "", currentPage: 0, totalPages: 0, pagesAttempted: 0,
   pagesSucceeded: 0, parsedPlayers: 0, mappedPlayers: 0, skippedPlayers: 0,
   savedPlayers: 0, insertedPlayers: 0, updatedPlayers: 0, errors: [], nextRunAt: null,
@@ -126,11 +153,15 @@ globalThis.FutbinSyncModuleControls.important = {
 async function handleMessage(message) {
   await API_CONFIG.ready;
   if (message?.type === "GET_SNAPSHOT") return { ok: true, state: await getState() };
-  if (message?.type === "START_SYNC") return startSync({ apiBaseUrl: message.apiBaseUrl, runOnce: true });
+  if (message?.type === "START_SYNC") return startSync({ apiBaseUrl: message.apiBaseUrl, runOnce: true, minRating: message.minRating, maxRating: message.maxRating });
   if (message?.type === "STOP_SYNC") return stopSync();
   if (message?.type === "CLEAR_SYNC") {
     await stopSync();
-    await setState({ ...initialState, apiBaseUrl: normalizeApi(message.apiBaseUrl || defaultApiBaseUrl()) });
+    // Logs/stats reset to defaults, but the user's configured rating range
+    // is a preference, not run output — it survives a clear.
+    const existing = await getState();
+    const { minRating, maxRating } = normalizeRatingRange(existing.minRating, existing.maxRating, existing);
+    await setState({ ...initialState, minRating, maxRating, sourceUrl: buildSourceUrl(minRating, maxRating), apiBaseUrl: normalizeApi(message.apiBaseUrl || defaultApiBaseUrl()) });
     return { ok: true };
   }
   if (message?.type === "OPEN_NETWORK_MONITOR") {
@@ -143,7 +174,7 @@ async function handleMessage(message) {
   return { ok: false, error: "Bilinmeyen mesaj" };
 }
 
-async function startSync({ scheduled = false, apiBaseUrl: rawApiBaseUrl, runOnce = false, centralManaged = false, centralRunId = null } = {}) {
+async function startSync({ scheduled = false, apiBaseUrl: rawApiBaseUrl, runOnce = false, centralManaged = false, centralRunId = null, minRating, maxRating } = {}) {
   if (!centralManaged && await isFcSyncEnabled()) {
     return { ok: false, error: "Merkezi sync çalışırken tekil Important Players başlatılamaz." };
   }
@@ -154,15 +185,18 @@ async function startSync({ scheduled = false, apiBaseUrl: rawApiBaseUrl, runOnce
   const apiBaseUrl = allowedApiBaseUrl(rawApiBaseUrl || existing.apiBaseUrl || defaultApiBaseUrl());
   const startedAt = Date.now();
   const roundNumber = (Number(existing.roundNumber) || 0) + 1;
+  const resolvedRating = normalizeRatingRange(minRating, maxRating, existing);
+  const sourceUrl = buildSourceUrl(resolvedRating.minRating, resolvedRating.maxRating);
   await setState({ ...initialState, running: true, waitingForNextRun: false, runOnce, centralManaged, centralRunId, roundNumber,
+    minRating: resolvedRating.minRating, maxRating: resolvedRating.maxRating, sourceUrl,
     status: `${roundNumber}. tur başladı`, apiBaseUrl, startedAt, updatedAt: Date.now(),
-    logs: [...(existing.logs || []), logEntry(`${roundNumber}. çalışma turu başladı · API: ${apiBaseUrl}`)].slice(-500) });
-  runSync(token, apiBaseUrl).catch((error) => failRun(token, error));
+    logs: [...(existing.logs || []), logEntry(`${roundNumber}. çalışma turu başladı · Rating ${resolvedRating.minRating}-${resolvedRating.maxRating} · API: ${apiBaseUrl}`)].slice(-500) });
+  runSync(token, apiBaseUrl, sourceUrl, resolvedRating.minRating, resolvedRating.maxRating).catch((error) => failRun(token, error));
   return { ok: true, scheduled, state: await getState() };
 }
 
-async function runSync(token, apiBaseUrl) {
-  importantConsole("Run started", { apiBaseUrl, sourceUrl: SOURCE_URL });
+async function runSync(token, apiBaseUrl, sourceUrl = SOURCE_URL, minRating = DEFAULT_MIN_RATING, maxRating = DEFAULT_MAX_RATING) {
+  importantConsole("Run started", { apiBaseUrl, sourceUrl, minRating, maxRating });
   await appendLog("API lookup GET yapılmayacak; mapping Futbin raw ID'leriyle POST tarafında çözülecek");
   const sentPlayerIds = new Set();
   let batchPlayers = new Map();
@@ -174,7 +208,7 @@ async function runSync(token, apiBaseUrl) {
   for (let page = 1; page <= totalPages; page++) {
     assertActive(token);
     await patchState({ currentPage: page, totalPages, pagesAttempted: page, status: `Futbin sayfası okunuyor: ${page} / ${totalPages}` });
-    const parsed = await fetchAndParsePage(page, token);
+    const parsed = await fetchAndParsePage(page, token, sourceUrl);
     importantConsole(`Futbin page ${page} parse result`, {
       page,
       totalPages: parsed.totalPages,
@@ -234,8 +268,8 @@ async function runSync(token, apiBaseUrl) {
       const body = {
         page_from: batchPageFrom, page_to: page, pages_attempted: page - batchPageFrom + 1,
         pages_succeeded: page - batchPageFrom + 1, players, sync_mode: "filtered_partial",
-      disable_missing_delete: true, source: "futbin_filtered_players", source_url: SOURCE_URL,
-      filter: { ps_price: "300-45000", player_rating: "82-95" }
+      disable_missing_delete: true, source: "futbin_filtered_players", source_url: sourceUrl,
+      filter: { ps_price: "300-45000", player_rating: `${minRating}-${maxRating}` }
       };
       importantConsole(`API POST payload pages ${batchPageFrom}-${page}`, body);
       let response;
@@ -312,8 +346,8 @@ async function runSync(token, apiBaseUrl) {
   if (finished.centralManaged) await notifyCentralRoundFinished(finished, true);
 }
 
-async function fetchAndParsePage(page, token) {
-  const url = new URL(SOURCE_URL); url.searchParams.set("page", String(page));
+async function fetchAndParsePage(page, token, sourceUrl = SOURCE_URL) {
+  const url = new URL(sourceUrl); url.searchParams.set("page", String(page));
   let lastError;
   for (let attempt = 1; attempt <= 3; attempt++) {
     assertActive(token); activeController = new AbortController();

@@ -15,7 +15,10 @@ el("start").classList.add("compact-action");
 el("start").innerHTML = `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m8 5 11 7-11 7z"/></svg><span>Başlat</span>`;
 el("network").classList.add("compact-action");
 el("network").innerHTML = `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20zm0 2c1.7 0 3.3 2.4 3.8 6H8.2C8.7 6.4 10.3 4 12 4zM4.3 10A8 8 0 0 1 7 5.4 16 16 0 0 0 6.2 10zm0 4h1.9c.2 1.8.5 3.3.9 4.6A8 8 0 0 1 4.3 14zm3.9 0h7.6c-.5 3.6-2.1 6-3.8 6s-3.3-2.4-3.8-6zm8.8 4.6c.4-1.3.7-2.8.9-4.6h1.9a8 8 0 0 1-2.8 4.6zM17.8 10c-.2-1.8-.5-3.3-.9-4.6a8 8 0 0 1 2.8 4.6z"/></svg>`;
-el("start").onclick = () => send("START_SYNC");
+el("start").onclick = () => send("START_SYNC", {
+  minRating: Number(el("min-rating").value),
+  maxRating: Number(el("max-rating").value)
+});
 el("stop").onclick = () => send("STOP_SYNC");
 el("clear").onclick = () => send("CLEAR_SYNC");
 el("network").onclick = () => send("OPEN_NETWORK_MONITOR");
@@ -30,6 +33,7 @@ function render(s) {
   el("status").textContent = s.status || "Hazır"; el("dot").classList.toggle("running", !!s.running);
   el("status-loader").hidden = !s.running || !!s.waitingForNextRun;
   el("start").hidden = !!s.running; el("stop").hidden = !s.running;
+  renderRatingRange(s);
   el("pages").textContent = `${s.currentPage || 0} / ${s.totalPages || 0}`;
   el("parsed").textContent = s.parsedPlayers || 0; el("mapped").textContent = s.mappedPlayers || 0;
   el("saved").textContent = s.savedPlayers || 0; el("skipped").textContent = s.skippedPlayers || 0;
@@ -40,6 +44,21 @@ function render(s) {
   el("bar").style.width = `${s.totalPages ? Math.min(100, (s.currentPage / s.totalPages) * 100) : 0}%`;
   renderLogs(s.logs || []);
   renderErrors(s.errors || []);
+}
+
+// Shows the rating range the next run will actually use (background.js's
+// state, not a hardcoded default). Left editable up until Start is pressed;
+// skips writing into whichever input the user currently has focused so a
+// state refresh while they're mid-edit doesn't overwrite their typing.
+function renderRatingRange(s) {
+  const minInput = el("min-rating");
+  const maxInput = el("max-rating");
+  const minRating = Number.isFinite(Number(s.minRating)) ? Number(s.minRating) : 82;
+  const maxRating = Number.isFinite(Number(s.maxRating)) ? Number(s.maxRating) : 95;
+  if (document.activeElement !== minInput) minInput.value = minRating;
+  if (document.activeElement !== maxInput) maxInput.value = maxRating;
+  minInput.disabled = !!s.running;
+  maxInput.disabled = !!s.running;
 }
 
 function renderLogs(logs) {

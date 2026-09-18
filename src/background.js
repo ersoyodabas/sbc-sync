@@ -12,6 +12,12 @@ let transitionQueue = Promise.resolve();
 const idleOrchestratorState = {
   enabled: false,
   activeModule: null,
+  // The per-run cycle order — normally MODULE_ORDER itself, but narrowed to
+  // whichever modules the dashboard's per-panel switches left enabled at
+  // START_SYNC time (see dashboard.js's startEnabledModules). Round-robin
+  // advancement in handleModuleRoundFinished walks THIS array, not the
+  // global MODULE_ORDER, so a disabled module is skipped for the whole run.
+  moduleOrder: MODULE_ORDER,
   round: 0,
   runId: 0,
   status: READY_STATUS,
@@ -43,8 +49,10 @@ chrome.runtime.onStartup.addListener(() => {
     }
     await stopAllSyncs();
     await setFcSyncEnabled(true);
-    await startModule(orchestrator.activeModule || MODULE_ORDER[0], {
+    const moduleOrder = normalizeModuleOrder(orchestrator.moduleOrder);
+    await startModule(orchestrator.activeModule || moduleOrder[0], {
       ...orchestrator,
+      moduleOrder,
       status: "Tarayıcı başlangıcından sonra devam ediyor"
     });
   });
@@ -63,20 +71,32 @@ async function handleCentralSyncMessage(message) {
   if (message.type === "GET_SNAPSHOT") return centralSnapshot();
 
   if (message.type === "START_SYNC") {
+    // The dashboard's per-panel switches (see dashboard.js's
+    // startEnabledModules) narrow which modules this run's round-robin
+    // actually cycles through. No enabledModules at all (an older
+    // dashboard build, or a raw API call) keeps the full MODULE_ORDER —
+    // only an explicit, non-empty list narrows it.
+    const moduleOrder = Array.isArray(message.enabledModules) && message.enabledModules.length
+      ? MODULE_ORDER.filter((id) => message.enabledModules.includes(id))
+      : MODULE_ORDER;
+    if (!moduleOrder.length) {
+      return { ok: false, error: "Başlatmak için en az bir modül etkin olmalı." };
+    }
     await stopAllSyncs();
     const previous = await getOrchestratorState();
     const next = {
       ...idleOrchestratorState,
       enabled: true,
-      activeModule: MODULE_ORDER[0],
+      activeModule: moduleOrder[0],
+      moduleOrder,
       round: 1,
       runId: Number(previous.runId || 0) + 1,
-      status: "1. tur · Latest Player Sync başlıyor",
+      status: `1. tur · ${moduleLabel(moduleOrder[0])} başlıyor`,
       updatedAt: Date.now()
     };
     await setFcSyncEnabled(true);
     await writeOrchestratorState(next);
-    await startModule(MODULE_ORDER[0], next, message);
+    await startModule(moduleOrder[0], next, message);
     return centralSnapshot();
   }
 
@@ -97,19 +117,33 @@ async function handleCentralSyncMessage(message) {
   return { ok: false, error: "Bilinmeyen merkezi senkronizasyon mesajı." };
 }
 
+// A stored moduleOrder can be stale/empty (state written before this
+// feature existed, or corrupted) — always fall back to the full
+// MODULE_ORDER rather than cycling an empty/unknown array.
+function normalizeModuleOrder(moduleOrder) {
+  return Array.isArray(moduleOrder) && moduleOrder.length
+    ? moduleOrder.filter((id) => MODULE_ORDER.includes(id))
+    : MODULE_ORDER;
+}
+
 async function handleModuleRoundFinished(message) {
   const current = await getOrchestratorState();
   const moduleName = String(message.module || "");
   if (!current.enabled || current.activeModule !== moduleName || Number(message.runId) !== Number(current.runId)) {
     return { ok: true, ignored: true };
   }
-  const currentIndex = MODULE_ORDER.indexOf(moduleName);
+  // Cycles through THIS run's moduleOrder (narrowed at START_SYNC to the
+  // panels left enabled), not the global MODULE_ORDER — a disabled module
+  // is skipped for every round of the run, not just the first.
+  const moduleOrder = normalizeModuleOrder(current.moduleOrder);
+  const currentIndex = moduleOrder.indexOf(moduleName);
   if (currentIndex < 0) return { ok: true, ignored: true };
-  const nextIndex = (currentIndex + 1) % MODULE_ORDER.length;
-  const nextModule = MODULE_ORDER[nextIndex];
+  const nextIndex = (currentIndex + 1) % moduleOrder.length;
+  const nextModule = moduleOrder[nextIndex];
   const next = {
     ...current,
     activeModule: nextModule,
+    moduleOrder,
     round: nextIndex === 0 ? Number(current.round || 0) + 1 : current.round,
     status: message.ok === false
       ? `${moduleLabel(moduleName)} hata verdi; ${moduleLabel(nextModule)} başlıyor`
