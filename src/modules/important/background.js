@@ -1,9 +1,10 @@
 import { FUTBIN_CHALLENGE_MAX_WAIT_MS, futbinChallengeTimeoutError, isFutbinChallengeHtml } from "../futbin/challenge.js";
 
 const STATE_KEY = "filteredPlayersSyncState";
+const FILTERS_KEY = "importantPlayersFilters";
 const ALARM = "filtered-players-hourly";
 const DEFAULT_MIN_RATING = 55;
-const DEFAULT_MAX_RATING = 95;
+const DEFAULT_MAX_RATING = 99;
 const RATING_LOWER_BOUND = 1;
 const RATING_UPPER_BOUND = 99;
 // player_rating is parametric now (popup header inputs) instead of baked
@@ -13,6 +14,7 @@ function buildSourceUrl(minRating, maxRating) {
   return `https://www.futbin.com/27/players?ps_price=300-45000&player_rating=${minRating}-${maxRating}&sort=Player_Rating&order=asc&eUnt=1`;
 }
 function clampRating(value, fallback) {
+  if (value === undefined || value === null || value === "") return fallback;
   const n = Number(value);
   if (!Number.isFinite(n)) return fallback;
   return Math.min(RATING_UPPER_BOUND, Math.max(RATING_LOWER_BOUND, Math.round(n)));
@@ -153,6 +155,17 @@ globalThis.FutbinSyncModuleControls.important = {
 async function handleMessage(message) {
   await API_CONFIG.ready;
   if (message?.type === "GET_SNAPSHOT") return { ok: true, state: await getState() };
+  if (message?.type === "SET_FILTERS") {
+    const state = await getState();
+    if (state.running || await isFcSyncEnabled()) return { ok: false, error: "Filtreyi değiştirmeden önce çalışan işlemi sonlandırın." };
+    const minRating = Number(message.minRating);
+    const maxRating = Number(message.maxRating);
+    if (![minRating, maxRating].every((rating) => Number.isInteger(rating) && rating >= RATING_LOWER_BOUND && rating <= RATING_UPPER_BOUND) || minRating > maxRating) {
+      return { ok: false, error: `Rating ${RATING_LOWER_BOUND}–${RATING_UPPER_BOUND} aralığında olmalı; Min, Max değerini aşamaz.` };
+    }
+    await patchState({ minRating, maxRating, sourceUrl: buildSourceUrl(minRating, maxRating) });
+    return { ok: true, state: await getState() };
+  }
   if (message?.type === "START_SYNC") return startSync({ apiBaseUrl: message.apiBaseUrl, runOnce: true, minRating: message.minRating, maxRating: message.maxRating });
   if (message?.type === "STOP_SYNC") return stopSync();
   if (message?.type === "CLEAR_SYNC") {
@@ -175,6 +188,7 @@ async function handleMessage(message) {
 }
 
 async function startSync({ scheduled = false, apiBaseUrl: rawApiBaseUrl, runOnce = false, centralManaged = false, centralRunId = null, minRating, maxRating } = {}) {
+  await API_CONFIG.ready;
   if (!centralManaged && await isFcSyncEnabled()) {
     return { ok: false, error: "Merkezi sync çalışırken tekil Important Players başlatılamaz." };
   }
@@ -221,6 +235,10 @@ async function runSync(token, apiBaseUrl, sourceUrl = SOURCE_URL, minRating = DE
     if (!parsed.players.length && !parsed.confirmedEmpty) throw new Error(`Sayfa ${page} oyuncu içermiyor; sonuç güvenli kabul edilmedi.`);
     parsedTotal += parsed.players.length;
     for (const raw of parsed.players) {
+      if (!Number.isFinite(Number(raw.rating)) || Number(raw.rating) < minRating || Number(raw.rating) > maxRating) {
+        skippedTotal++;
+        continue;
+      }
       const playerId = String(raw.futbinPlayerId);
       if (sentPlayerIds.has(playerId)) continue;
       try {
@@ -802,8 +820,20 @@ async function ensureNetworkMonitor(focus = false) {
 function defaultApiBaseUrl() { return API_CONFIG.defaultBaseUrl(); }
 function normalizeApi(value) { return API_CONFIG.normalizeBaseUrl(value); }
 function allowedApiBaseUrl(value) { return API_CONFIG.allowedBaseUrl(value); }
-async function getState() { return (await chrome.storage.local.get(STATE_KEY))[STATE_KEY] || { ...initialState }; }
-async function setState(state) { await chrome.storage.local.set({ [STATE_KEY]: state }); chrome.runtime.sendMessage({ type: "STATE_CHANGED", futbinSyncModule: "important", state }).catch(() => {}); return state; }
+async function getState() {
+  const stored = await chrome.storage.local.get([STATE_KEY, FILTERS_KEY]);
+  const state = stored[STATE_KEY] || { ...initialState };
+  const filters = stored[FILTERS_KEY] || {};
+  const normalized = normalizeRatingRange(filters.minRating ?? state.minRating, filters.maxRating ?? state.maxRating, initialState);
+  const { minRating, maxRating } = normalized;
+  return { ...state, minRating, maxRating, sourceUrl: buildSourceUrl(minRating, maxRating) };
+}
+async function setState(state) {
+  const filters = { minRating: state.minRating, maxRating: state.maxRating };
+  await chrome.storage.local.set({ [STATE_KEY]: state, [FILTERS_KEY]: filters });
+  chrome.runtime.sendMessage({ type: "STATE_CHANGED", futbinSyncModule: "important", state }).catch(() => {});
+  return state;
+}
 async function patchState(patch) { return setState({ ...(await getState()), ...patch, updatedAt: Date.now() }); }
 async function appendLog(message) { const state = await getState(); await patchState({ logs: [...(state.logs || []), logEntry(message)].slice(-200) }); }
 async function appendLogs(messages) { const state = await getState(); await patchState({ logs: [...(state.logs || []), ...messages.map(logEntry)].slice(-500) }); }

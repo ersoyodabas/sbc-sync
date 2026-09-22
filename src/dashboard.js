@@ -106,6 +106,12 @@ const template = document.querySelector("#panelTemplate");
 const globalStart = document.querySelector("#global-start");
 const globalTerminate = document.querySelector("#global-terminate");
 const centralStatus = document.querySelector("#central-status");
+const environmentControl = document.querySelector("#environment-control");
+const environmentTabs = [...environmentControl.querySelectorAll(".environment-tab")];
+let environmentChanging = false;
+let filtersDirty = false;
+let filtersSaving = false;
+let filterSaveTimer = null;
 let centralSyncEnabled = false;
 let centralActiveModule = null;
 let centralRound = 0;
@@ -117,6 +123,7 @@ let centralRound = 0;
 // actually share) as { [moduleId]: boolean }. Missing/unset === enabled, so
 // every module defaults to active without needing to pre-seed the object.
 const MODULE_ENABLED_KEY = "fcSyncModuleEnabled";
+const IMPORTANT_FILTERS_KEY = "importantPlayersFilters";
 let moduleEnabled = {};
 const isModuleEnabled = (moduleId) => moduleEnabled[moduleId] !== false;
 
@@ -126,6 +133,7 @@ setInterval(refreshAll, 2500);
 
 chrome.storage.onChanged.addListener((changes, area) => {
   if (area !== "local") return;
+  if (changes[API_CONFIG.environmentKey]) renderEnvironmentControl();
   if (changes.fcSyncEnabled || changes.fcSyncOrchestratorState) refreshCentralControl();
   if (changes[MODULE_ENABLED_KEY]) {
     moduleEnabled = changes[MODULE_ENABLED_KEY].newValue || {};
@@ -147,6 +155,16 @@ async function init() {
   moduleEnabled = stored[MODULE_ENABLED_KEY] || {};
   globalStart.addEventListener("click", () => startEnabledModules());
   globalTerminate.addEventListener("click", () => runCentralSync("STOP_SYNC"));
+  environmentTabs.forEach((tab, index) => {
+    tab.addEventListener("click", () => changeEnvironment(tab.dataset.environment));
+    tab.addEventListener("keydown", (event) => {
+      if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
+      event.preventDefault();
+      const next = environmentTabs[event.key === "Home" ? 0 : event.key === "End" ? 1 : 1 - index];
+      next.focus();
+      next.click();
+    });
+  });
   for (const module of modules) {
     mountPanel(module);
   }
@@ -154,13 +172,81 @@ async function init() {
   await refreshCentralControl();
 }
 
-function startEnabledModules() {
+async function startEnabledModules() {
   const enabledModules = modules.map((module) => module.id).filter(isModuleEnabled);
   if (!enabledModules.length) {
     showToast("Başlatmak için en az bir modülü aktif bırakın.");
     return;
   }
-  runCentralSync("START_SYNC", { enabledModules });
+  if (enabledModules.includes("important") && !await saveImportantFilters()) return;
+  await runCentralSync("START_SYNC", { enabledModules });
+}
+
+function renderEnvironmentControl() {
+  DEFAULT_API_BASE_URL = API_CONFIG.defaultBaseUrl();
+  const snapshotsReady = latestSnapshots.size === modules.length;
+  const busy = !snapshotsReady || centralSyncEnabled || modules.some((module) => {
+    const state = module.snapshotState(latestSnapshots.get(module.id));
+    return state && (state.running || state.waitingForNextRun || state.nextRunAt);
+  });
+  environmentControl.title = busy ? "Ortamı değiştirmek için çalışan işlemleri sonlandırın." : DEFAULT_API_BASE_URL;
+  for (const tab of environmentTabs) {
+    const selected = tab.dataset.environment === API_CONFIG.environment();
+    tab.setAttribute("aria-selected", String(selected));
+    tab.tabIndex = selected ? 0 : -1;
+    tab.disabled = environmentChanging || busy;
+  }
+}
+
+async function changeEnvironment(environment) {
+  if (environmentChanging || environment === API_CONFIG.environment()) return;
+  environmentChanging = true;
+  renderEnvironmentControl();
+  try {
+    const response = await chrome.runtime.sendMessage({ futbinSyncModule: "fc-sync", type: "SET_ENVIRONMENT", environment });
+    if (!response?.ok) throw new Error(response?.error || "Ortam değiştirilemedi.");
+    await refreshAll();
+  } catch (error) {
+    showToast(error.message || String(error));
+  } finally {
+    environmentChanging = false;
+    renderEnvironmentControl();
+  }
+}
+
+async function saveImportantFilters() {
+  const panel = panels.get("important");
+  const form = panel.querySelector(".rating-filter-form");
+  const min = panel.querySelector(".min-rating");
+  const max = panel.querySelector(".max-rating");
+  max.setCustomValidity(Number(min.value) > Number(max.value) ? "Max, Min değerinden küçük olamaz." : "");
+  if (!form.reportValidity() || filtersSaving) return false;
+  if (!filtersDirty) return true;
+  filtersSaving = true;
+  try {
+    const response = await send(modules.find((module) => module.id === "important"), "SET_FILTERS", { minRating: Number(min.value), maxRating: Number(max.value) });
+    if (!response?.ok) throw new Error(response?.error || "Filtre kaydedilemedi.");
+    filtersDirty = false;
+    panel.querySelector(".filter-status").textContent = "Kaydedildi";
+    return true;
+  } catch (error) {
+    showToast(error.message || String(error));
+    return false;
+  } finally {
+    filtersSaving = false;
+  }
+}
+
+function queueImportantFilterSave() {
+  if (filterSaveTimer) clearTimeout(filterSaveTimer);
+  filterSaveTimer = setTimeout(() => {
+    filterSaveTimer = null;
+    if (filtersSaving) {
+      queueImportantFilterSave();
+      return;
+    }
+    void saveImportantFilters();
+  }, 150);
 }
 
 async function setModuleEnabled(moduleId, enabled) {
@@ -199,6 +285,26 @@ function mountPanel(module) {
   extra.addEventListener("click", () => extraAction(module));
   start.addEventListener("click", () => action(module, "START_SYNC"));
   stop.addEventListener("click", () => action(module, "STOP_SYNC"));
+
+  if (module.id === "important") {
+    panel.querySelector(".filters").hidden = false;
+    panel.querySelector(".rating-filter-form").addEventListener("submit", (event) => {
+      event.preventDefault();
+      void saveImportantFilters();
+    });
+    panel.querySelectorAll(".rating-filter-form input").forEach((input) => input.addEventListener("input", () => {
+      filtersDirty = true;
+      panel.querySelector(".max-rating").setCustomValidity("");
+      panel.querySelector(".filter-status").textContent = "Kaydedilmedi";
+      const min = Number(panel.querySelector(".min-rating").value);
+      const max = Number(panel.querySelector(".max-rating").value);
+      if (Number.isInteger(min) && Number.isInteger(max) && min >= 1 && max <= 99 && min <= max) {
+        chrome.storage.local.set({ [IMPORTANT_FILTERS_KEY]: { minRating: min, maxRating: max } });
+        panel.querySelector(".filter-status").textContent = "Local storage'a kaydedildi";
+        queueImportantFilterSave();
+      }
+    }));
+  }
 
   dashboard.appendChild(fragment);
   panels.set(module.id, panel);
@@ -239,6 +345,7 @@ async function refreshCentralControl() {
     globalTerminate.disabled = !centralSyncEnabled;
     globalStart.setAttribute("aria-pressed", String(centralSyncEnabled));
     globalTerminate.setAttribute("aria-pressed", String(!centralSyncEnabled));
+    renderEnvironmentControl();
     modules.forEach((module) => {
       const snapshot = latestSnapshots.get(module.id);
       if (snapshot) renderModule(module, snapshot);
@@ -309,6 +416,7 @@ async function action(module, type, payload = {}) {
     return;
   }
   try {
+    if (module.id === "important" && type === "START_SYNC" && !await saveImportantFilters()) return;
     const response = await send(module, type, payload);
     if (!response?.ok) throw new Error(response?.error || "İşlem başarısız.");
     await refreshModule(module);
@@ -328,6 +436,14 @@ function renderModule(module, response) {
   const logs = module.logs(response, state);
   const errors = module.errors(response, state);
   panel.dataset.running = state.running ? "true" : "false";
+  renderEnvironmentControl();
+  if (module.id === "important") {
+    for (const [selector, value] of [[".min-rating", state.minRating ?? 55], [".max-rating", state.maxRating ?? 99]]) {
+      const input = panel.querySelector(selector);
+      if (!filtersDirty && !filtersSaving) input.value = value;
+      input.disabled = centralSyncEnabled || Boolean(state.running);
+    }
+  }
   const active = centralSyncEnabled
     ? centralActiveModule === module.id
     : Boolean(state.running && !state.waitingForNextRun);

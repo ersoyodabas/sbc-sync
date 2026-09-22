@@ -68,7 +68,19 @@ chrome.runtime.onMessage.addListener((message, _sender, respond) => {
 });
 
 async function handleCentralSyncMessage(message) {
+  await globalThis.FutbinSyncApiConfig.ready;
   if (message.type === "GET_SNAPSHOT") return centralSnapshot();
+
+  if (message.type === "SET_ENVIRONMENT") {
+    const snapshot = await centralSnapshot();
+    const states = [snapshot.latest.latestSyncState, snapshot.pricerange.priceRangeSyncState, snapshot.important.state];
+    const isActive = (state) => state && (state.running || state.waitingForNextRun || state.nextRunAt || Object.values(state.runs || {}).some(isActive));
+    if (snapshot.enabled || states.some(isActive)) {
+      return { ok: false, error: "Ortamı değiştirmeden önce çalışan işlemleri sonlandırın." };
+    }
+    await globalThis.FutbinSyncApiConfig.setEnvironment(message.environment);
+    return centralSnapshot();
+  }
 
   if (message.type === "START_SYNC") {
     // The dashboard's per-panel switches (see dashboard.js's
@@ -183,7 +195,7 @@ async function centralSnapshot() {
     moduleControl("pricerange").getSnapshot(),
     moduleControl("important").getSnapshot()
   ]);
-  return { ok: true, enabled: orchestrator.enabled, orchestrator, latest, pricerange, important };
+  return { ok: true, environment: globalThis.FutbinSyncApiConfig.environment(), enabled: orchestrator.enabled, orchestrator, latest, pricerange, important };
 }
 
 async function stopAllSyncs() {

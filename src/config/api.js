@@ -4,6 +4,12 @@
   let apiBaseUrl = "";
   let configurationError = null;
   const DEFAULT_WAIT_MS = 5000;
+  const ENVIRONMENT_KEY = "fcSyncEnvironment";
+  const API_BASE_URLS = Object.freeze({
+    local: "http://localhost:5055/api/",
+    prod: "https://api.sbcmonster.com/api/"
+  });
+  let selectedEnvironment = null;
 
   function parseEnv(text) {
     const values = {};
@@ -95,11 +101,23 @@
 
   function configuredBaseUrl() {
     if (configurationError) throw configurationError;
-    return apiBaseUrl;
+    return selectedEnvironment ? baseUrlFor(selectedEnvironment) : apiBaseUrl;
   }
 
   function baseUrlFor(environment) {
-    void environment;
+    if (!Object.hasOwn(API_BASE_URLS, environment)) throw new Error("Geçersiz ortam seçimi.");
+    return API_BASE_URLS[environment];
+  }
+
+  function environment() {
+    return selectedEnvironment || (apiBaseUrl === API_BASE_URLS.prod ? "prod" : "local");
+  }
+
+  async function setEnvironment(value) {
+    baseUrlFor(value);
+    await readyPromise;
+    await global.chrome.storage.local.set({ [ENVIRONMENT_KEY]: value });
+    selectedEnvironment = value;
     return configuredBaseUrl();
   }
 
@@ -112,7 +130,18 @@
     return configuredBaseUrl();
   }
 
-  readyPromise = load().catch((error) => {
+  global.chrome?.storage?.onChanged?.addListener((changes, area) => {
+    if (area !== "local" || !changes[ENVIRONMENT_KEY]) return;
+    const value = changes[ENVIRONMENT_KEY].newValue;
+    selectedEnvironment = Object.hasOwn(API_BASE_URLS, value) ? value : null;
+  });
+
+  readyPromise = (async () => {
+    await load();
+    const stored = await global.chrome.storage.local.get(ENVIRONMENT_KEY);
+    const value = stored[ENVIRONMENT_KEY];
+    selectedEnvironment = Object.hasOwn(API_BASE_URLS, value) ? value : environment();
+  })().catch((error) => {
     configurationError = error;
     console.error("[CONFIG] API_BASE_URL yüklenemedi:", error);
     throw error;
@@ -125,6 +154,9 @@
     number,
     defaultBaseUrl,
     baseUrlFor,
+    environment,
+    setEnvironment,
+    environmentKey: ENVIRONMENT_KEY,
     normalizeBaseUrl,
     allowedBaseUrl,
     defaultWaitMs: () => DEFAULT_WAIT_MS,

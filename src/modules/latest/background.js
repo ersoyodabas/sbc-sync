@@ -147,8 +147,9 @@ globalThis.FutbinSyncModuleControls = globalThis.FutbinSyncModuleControls || {};
 globalThis.FutbinSyncModuleControls.latest = {
   getSnapshot: async () => ({ ok: true, ...(await chrome.storage.local.get([STATE_KEY, RECORDS_KEY, LOGS_KEY, ERRORS_KEY])) }),
   start: async ({ apiBaseUrl, waitMs, operations, runOnce = false, centralManaged = false, centralRunId = null } = {}) => {
+    await API_CONFIG.ready;
     await chrome.storage.local.set({ [AUTO_RUN_KEY]: !runOnce });
-    return startParallelSync(apiBaseUrl, waitMs, operations || EXTENSION_OPERATIONS, { runOnce, centralManaged, centralRunId });
+    return startParallelSync(apiBaseUrl || API_CONFIG.defaultBaseUrl(), waitMs, operations || EXTENSION_OPERATIONS, { runOnce, centralManaged, centralRunId });
   },
   stop: async () => {
     await chrome.storage.local.set({ [AUTO_RUN_KEY]: false });

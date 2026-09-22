@@ -8,11 +8,17 @@
   </head>
   <body>
     <main class="app-shell">
-      <div id="global-control" class="global-control" aria-label="FC Sync merkezi denetimi">
+      <div class="global-toolbar">
+        <div id="global-control" class="global-control" aria-label="FC Sync merkezi denetimi">
         <span class="global-control-label">FC Sync</span>
         <span id="central-status" class="central-status">Hazır</span>
         <button id="global-start" class="global-button global-start" type="button">Başlat</button>
         <button id="global-terminate" class="global-button global-terminate" type="button"> Sonlandır</button>
+        </div>
+        <div id="environment-control" class="global-control environment-control" role="tablist" aria-label="API ortamı">
+          <button type="button" class="environment-tab" role="tab" data-environment="local" aria-selected="false" disabled>Local</button>
+          <button type="button" class="environment-tab" role="tab" data-environment="prod" aria-selected="false" disabled>Prod</button>
+        </div>
       </div>
       <section id="dashboard" class="dashboard" aria-label="FutbinSync dashboard"></section>
     </main>
@@ -49,6 +55,16 @@
         </div>
 
         <div class="metric-grid"></div>
+
+        <section class="activity filters" hidden aria-label="Important Players Filters">
+          <div class="section-title"><span class="section-label">Filters</span><span class="filter-range-label">Rating Range</span></div>
+          <form class="rating-filter-form">
+            <label>Min<input class="min-rating" name="minRating" type="number" min="1" max="99" step="1" required aria-label="Minimum rating"></label>
+            <span class="range-separator" aria-hidden="true">–</span>
+            <label>Max<input class="max-rating" name="maxRating" type="number" min="1" max="99" step="1" required aria-label="Maximum rating"></label>
+            <span class="filter-status" role="status"></span>
+          </form>
+        </section>
 
         <section class="activity">
           <div class="section-title">
