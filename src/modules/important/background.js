@@ -219,6 +219,7 @@ async function runSync(token, apiBaseUrl, sourceUrl = SOURCE_URL, minRating = DE
   let parsedTotal = 0, mappedTotal = 0, skippedTotal = 0;
   let saved = 0, inserted = 0, updated = 0;
   let totalPages = 1;
+  let loggedPlayerImageIds = 0;
   for (let page = 1; page <= totalPages; page++) {
     assertActive(token);
     await patchState({ currentPage: page, totalPages, pagesAttempted: page, status: `Futbin sayfası okunuyor: ${page} / ${totalPages}` });
@@ -235,6 +236,31 @@ async function runSync(token, apiBaseUrl, sourceUrl = SOURCE_URL, minRating = DE
     if (!parsed.players.length && !parsed.confirmedEmpty) throw new Error(`Sayfa ${page} oyuncu içermiyor; sonuç güvenli kabul edilmedi.`);
     parsedTotal += parsed.players.length;
     for (const raw of parsed.players) {
+      if (loggedPlayerImageIds < 3) {
+        importantConsole("Player image identifier candidate", {
+          futbinPlayerId: raw.futbinPlayerId,
+          playerImageUrl: raw.playerImageUrl || null,
+          extractedPlayerImageId: raw.extractedPlayerImageId ?? null,
+          discoveredNumericIds: {
+            futbinPlayerId: raw.futbinPlayerId,
+            playerImageId: raw.extractedPlayerImageId,
+            futbinClubId: raw.futbinClubId,
+            futbinLeagueId: raw.futbinLeagueId,
+            futbinNationId: raw.futbinNationId,
+            futbinRarityId: raw.futbinRarityId
+          },
+          dataAttributes: raw.sourceDataAttributes || [],
+          cardImageAttributes: raw.cardImageAttributes || null,
+          playerImageAttributes: raw.playerImageAttributes || null,
+          futbinCardRevision: raw.futbinCardRevision ?? null,
+          futbinItemScore: raw.futbinItemScore ?? null,
+          futbinFoot: raw.futbinFoot ?? null,
+          futbinSkillMoves: raw.futbinSkillMoves ?? null,
+          futbinWeakFoot: raw.futbinWeakFoot ?? null,
+          futbinAssetId: raw.extractedPlayerImageId ?? null
+        });
+        loggedPlayerImageIds++;
+      }
       if (!Number.isFinite(Number(raw.rating)) || Number(raw.rating) < minRating || Number(raw.rating) > maxRating) {
         skippedTotal++;
         continue;
@@ -296,6 +322,7 @@ async function runSync(token, apiBaseUrl, sourceUrl = SOURCE_URL, minRating = DE
           method: "POST", body: JSON.stringify(body)
         }, token, batchPageFrom, page);
       } catch (error) {
+        assertActive(token);
         const failedPlayers = players.map((player) => ({
           player: player.name || player.full_name || "(isimsiz)",
           futbin_player_id: player.futbin_player_id,
@@ -597,8 +624,22 @@ function toPayloadPlayer(raw) {
     league_name: raw.leagueName,
     club_name: raw.clubName,
     alternative_positions: (raw.alternativePositions || []).join(","),
-    active: true
+    active: true,
+    ...futbinMetadataFields(raw),
+    futbin_asset_id: raw.extractedPlayerImageId ?? null
   };
+}
+function futbinMetadataFields(raw) {
+  const fields = {
+    futbin_card_revision: raw.futbinCardRevision,
+    futbin_item_score: raw.futbinItemScore,
+    futbin_foot: raw.futbinFoot,
+    futbin_skill_moves: raw.futbinSkillMoves,
+    futbin_weak_foot: raw.futbinWeakFoot
+  };
+  return Object.fromEntries(Object.entries(fields).filter(([, value]) =>
+    value !== undefined && value !== null && !(typeof value === "string" && value.trim() === "")
+  ));
 }
 function cleanPayloadPlayerName(value) {
   const normalized = String(value || "")
@@ -739,6 +780,7 @@ async function apiRequestWithRetry(base, path, options, token, pageFrom, pageTo)
       assertActive(token);
       return response;
     } catch (error) {
+      assertActive(token);
       lastError = error;
       if (attempt < 3) await delay(REQUEST_DELAY_MS);
     }

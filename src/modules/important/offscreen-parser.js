@@ -27,7 +27,7 @@ function totalPages(doc) {
   return Math.max(1, ...nums);
 }
 function parsePlayerRow(row) {
-  const nameLink = row.querySelector("td.table-name > a[href]") || row.querySelector("a.table-player-name");
+  const nameLink = row.querySelector("a.table-player-name[href]") || row.querySelector("td.table-name > a[href]");
   const playerLink = nameLink || row.querySelector("a.player-row-playercard");
   const url = absolute(playerLink?.getAttribute("href"));
   const id = Number(url.match(/\/player\/(\d+)/)?.[1]);
@@ -40,6 +40,7 @@ function parsePlayerRow(row) {
   const nationImg = nationLink?.querySelector("img") || row.querySelector("td.table-name img.nation");
   const cardImg = row.querySelector("td.table-name img[class*='bg'], td.table-name img.playercard-s-26-bg");
   const playerImg = row.querySelector("td.table-name img[class*='special-img'], td.table-name img[src*='/img/players/'], td.table-name img[class*='base-img']");
+  const footImageUrl = image(row.querySelector("td.table-foot img[src]"));
   const name = playerName(row, nameLink, playerImg);
   const fullName = playerFullName(row, nameLink, name);
   if (!name) throw new Error("Oyuncu ismi okunamadı");
@@ -53,8 +54,28 @@ function parsePlayerRow(row) {
     futbinClubId: assetId(clubImg, /\/clubs\/(?:dark\/)?(\d+)\./i) || queryId(clubLink, "club"),
     futbinLeagueId: assetId(leagueImg, /\/league\/(?:dark\/)?(\d+)\./i) || queryId(leagueLink, "league"),
     futbinNationId: assetId(nationImg, /\/nation\/(\d+)\./i) || queryId(nationLink, "nation"),
-    cardImageUrl: image(cardImg), playerImageUrl: image(playerImg), nationImageUrl: image(nationImg), leagueImageUrl: image(leagueImg), clubImageUrl: image(clubImg)
+    futbinCardRevision: text(row.querySelector(".table-player-revision")) || null,
+    futbinItemScore: optionalInteger(text(row.querySelector("td.table-item-score"))),
+    futbinFoot: footImageUrl.match(/\/foot-(left|right)\.svg(?:$|\?)/i)?.[1]?.toLowerCase() || null,
+    futbinSkillMoves: optionalInteger(text(row.querySelector("td.table-skills"))),
+    futbinWeakFoot: optionalInteger(text(row.querySelector("td.table-weak-foot"))),
+    sourceDataAttributes: [row, ...row.querySelectorAll("*")].flatMap((node) => [...node.attributes]
+      .filter((attribute) => attribute.name.startsWith("data-"))
+      .map((attribute) => ({ element: node.tagName.toLowerCase(), name: attribute.name, value: attribute.value }))),
+    cardImageAttributes: imageAttributes(cardImg), playerImageAttributes: imageAttributes(playerImg),
+    cardImageUrl: image(cardImg), playerImageUrl: image(playerImg),
+    extractedPlayerImageId: extractPlayerImageId(image(playerImg)),
+    nationImageUrl: image(nationImg), leagueImageUrl: image(leagueImg), clubImageUrl: image(clubImg)
   };
+}
+function extractPlayerImageId(value) {
+  try {
+    const path = new URL(String(value || ""), "https://www.futbin.com").pathname;
+    const match = path.match(/\/img\/players\/(\d+)\.png$/i);
+    if (!match) return null;
+    const id = Number(match[1]);
+    return Number.isSafeInteger(id) && id > 0 ? id : null;
+  } catch { return null; }
 }
 function playerName(row, nameLink, playerImg) {
   return cleanPlayerName(
@@ -95,8 +116,14 @@ function price(value) {
 function queryId(node, key) { try { return Number(new URL(node?.getAttribute("href") || "", "https://www.futbin.com").searchParams.get(key)); } catch { return 0; } }
 function assetId(node, pattern) { return Number(image(node).match(pattern)?.[1]) || 0; }
 function image(node) { return absolute(node?.getAttribute("src") || node?.getAttribute("data-src") || String(node?.getAttribute("srcset") || "").split(",")[0].trim().split(/\s+/)[0]); }
+function imageAttributes(node) {
+  if (!node) return null;
+  return Object.fromEntries(["alt", "class", "src", "srcset", "title"].filter((name) => node.hasAttribute(name))
+    .map((name) => [name, node.getAttribute(name)]));
+}
 function absolute(value) { try { return new URL(value || "", "https://www.futbin.com").href; } catch { return ""; } }
 function title(node) { return text({ textContent: node?.getAttribute("title") || node?.getAttribute("alt") }); }
 function text(node) { return String(node?.textContent || "").trim().replace(/\s+/g, " "); }
 function attr(node, name) { return String(node?.getAttribute(name) || "").trim(); }
 function integer(value) { return Number(String(value || "").match(/\d+/)?.[0]) || 0; }
+function optionalInteger(value) { const match = String(value || "").match(/\d+/); return match ? Number(match[0]) : null; }
