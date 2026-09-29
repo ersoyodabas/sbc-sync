@@ -57,11 +57,11 @@
         <div class="metric-grid"></div>
 
         <section class="activity filters" hidden aria-label="Important Players Filters">
-          <div class="section-title"><span class="section-label">Filters</span><span class="filter-range-label">Rating Range</span></div>
           <form class="rating-filter-form">
-            <label>Min<input class="min-rating" name="minRating" type="number" min="1" max="99" step="1" required aria-label="Minimum rating"></label>
-            <span class="range-separator" aria-hidden="true">–</span>
-            <label>Max<input class="max-rating" name="maxRating" type="number" min="1" max="99" step="1" required aria-label="Maximum rating"></label>
+            <svg class="rating-filter-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m12 2.8 2.8 5.7 6.3.9-4.6 4.5 1.1 6.3-5.6-3-5.6 3 1.1-6.3-4.6-4.5 6.3-.9L12 2.8Z"/></svg>
+            <input class="min-rating" name="minRating" type="number" min="1" max="99" step="1" required placeholder="Min" aria-label="Minimum rating">
+            <input class="max-rating" name="maxRating" type="number" min="1" max="99" step="1" required placeholder="Max" aria-label="Maximum rating">
+            <select class="league-filter" name="futbinLeagueId" aria-label="League"><option value="">All leagues</option></select>
             <span class="filter-status" role="status"></span>
           </form>
         </section>

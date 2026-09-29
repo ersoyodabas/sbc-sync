@@ -10,8 +10,16 @@ const RATING_UPPER_BOUND = 99;
 // player_rating is parametric now (popup header inputs) instead of baked
 // into a fixed URL — this builds the same Futbin query with whichever range
 // was actually configured for the run.
-function buildSourceUrl(minRating, maxRating) {
-  return `https://www.futbin.com/27/players?ps_price=300-45000&player_rating=${minRating}-${maxRating}&sort=Player_Rating&order=asc&eUnt=1`;
+function buildSourceUrl(minRating, maxRating, futbinLeagueId = null) {
+  const leagueId = normalizeFutbinLeagueId(futbinLeagueId);
+  const base = `https://www.futbin.com/27/players?ps_price=200-45000&player_rating=${minRating}-${maxRating}&sort=Player_Rating&order=asc&eUnt=1`;
+  return leagueId === null ? base : `${base}&league=${leagueId}`;
+}
+function normalizeFutbinLeagueId(value, fallback = null) {
+  if (value === null || value === "") return null;
+  if (value === undefined) return fallback;
+  const id = Number(value);
+  return Number.isInteger(id) && id > 0 ? id : fallback;
 }
 function clampRating(value, fallback) {
   if (value === undefined || value === null || value === "") return fallback;
@@ -53,6 +61,7 @@ const FC_SYNC_ENABLED_KEY = "fcSyncEnabled";
 const initialState = {
   runnerId: "filtered-players", running: false, status: "Hazır", sourceUrl: SOURCE_URL,
   minRating: DEFAULT_MIN_RATING, maxRating: DEFAULT_MAX_RATING,
+  futbinLeagueId: null,
   apiBaseUrl: "", currentPage: 0, totalPages: 0, pagesAttempted: 0,
   pagesSucceeded: 0, parsedPlayers: 0, mappedPlayers: 0, skippedPlayers: 0,
   savedPlayers: 0, insertedPlayers: 0, updatedPlayers: 0, errors: [], nextRunAt: null,
@@ -163,7 +172,8 @@ async function handleMessage(message) {
     if (![minRating, maxRating].every((rating) => Number.isInteger(rating) && rating >= RATING_LOWER_BOUND && rating <= RATING_UPPER_BOUND) || minRating > maxRating) {
       return { ok: false, error: `Rating ${RATING_LOWER_BOUND}–${RATING_UPPER_BOUND} aralığında olmalı; Min, Max değerini aşamaz.` };
     }
-    await patchState({ minRating, maxRating, sourceUrl: buildSourceUrl(minRating, maxRating) });
+    const futbinLeagueId = normalizeFutbinLeagueId(message.futbinLeagueId, (await getState()).futbinLeagueId);
+    await patchState({ minRating, maxRating, futbinLeagueId, sourceUrl: buildSourceUrl(minRating, maxRating, futbinLeagueId) });
     return { ok: true, state: await getState() };
   }
   if (message?.type === "START_SYNC") return startSync({ apiBaseUrl: message.apiBaseUrl, runOnce: true, minRating: message.minRating, maxRating: message.maxRating });
@@ -174,7 +184,8 @@ async function handleMessage(message) {
     // is a preference, not run output — it survives a clear.
     const existing = await getState();
     const { minRating, maxRating } = normalizeRatingRange(existing.minRating, existing.maxRating, existing);
-    await setState({ ...initialState, minRating, maxRating, sourceUrl: buildSourceUrl(minRating, maxRating), apiBaseUrl: normalizeApi(message.apiBaseUrl || defaultApiBaseUrl()) });
+    const futbinLeagueId = normalizeFutbinLeagueId(existing.futbinLeagueId);
+    await setState({ ...initialState, minRating, maxRating, futbinLeagueId, sourceUrl: buildSourceUrl(minRating, maxRating, futbinLeagueId), apiBaseUrl: normalizeApi(message.apiBaseUrl || defaultApiBaseUrl()) });
     return { ok: true };
   }
   if (message?.type === "OPEN_NETWORK_MONITOR") {
@@ -200,9 +211,10 @@ async function startSync({ scheduled = false, apiBaseUrl: rawApiBaseUrl, runOnce
   const startedAt = Date.now();
   const roundNumber = (Number(existing.roundNumber) || 0) + 1;
   const resolvedRating = normalizeRatingRange(minRating, maxRating, existing);
-  const sourceUrl = buildSourceUrl(resolvedRating.minRating, resolvedRating.maxRating);
+  const futbinLeagueId = normalizeFutbinLeagueId(existing.futbinLeagueId);
+  const sourceUrl = buildSourceUrl(resolvedRating.minRating, resolvedRating.maxRating, futbinLeagueId);
   await setState({ ...initialState, running: true, waitingForNextRun: false, runOnce, centralManaged, centralRunId, roundNumber,
-    minRating: resolvedRating.minRating, maxRating: resolvedRating.maxRating, sourceUrl,
+    minRating: resolvedRating.minRating, maxRating: resolvedRating.maxRating, futbinLeagueId, sourceUrl,
     status: `${roundNumber}. tur başladı`, apiBaseUrl, startedAt, updatedAt: Date.now(),
     logs: [...(existing.logs || []), logEntry(`${roundNumber}. çalışma turu başladı · Rating ${resolvedRating.minRating}-${resolvedRating.maxRating} · API: ${apiBaseUrl}`)].slice(-500) });
   runSync(token, apiBaseUrl, sourceUrl, resolvedRating.minRating, resolvedRating.maxRating).catch((error) => failRun(token, error));
@@ -868,10 +880,13 @@ async function getState() {
   const filters = stored[FILTERS_KEY] || {};
   const normalized = normalizeRatingRange(filters.minRating ?? state.minRating, filters.maxRating ?? state.maxRating, initialState);
   const { minRating, maxRating } = normalized;
-  return { ...state, minRating, maxRating, sourceUrl: buildSourceUrl(minRating, maxRating) };
+  const futbinLeagueId = normalizeFutbinLeagueId(
+    Object.hasOwn(filters, "futbinLeagueId") ? filters.futbinLeagueId : state.futbinLeagueId
+  );
+  return { ...state, minRating, maxRating, futbinLeagueId, sourceUrl: buildSourceUrl(minRating, maxRating, futbinLeagueId) };
 }
 async function setState(state) {
-  const filters = { minRating: state.minRating, maxRating: state.maxRating };
+  const filters = { minRating: state.minRating, maxRating: state.maxRating, futbinLeagueId: normalizeFutbinLeagueId(state.futbinLeagueId) };
   await chrome.storage.local.set({ [STATE_KEY]: state, [FILTERS_KEY]: filters });
   chrome.runtime.sendMessage({ type: "STATE_CHANGED", futbinSyncModule: "important", state }).catch(() => {});
   return state;

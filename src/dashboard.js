@@ -168,6 +168,7 @@ async function init() {
   for (const module of modules) {
     mountPanel(module);
   }
+  await loadLeagueOptions();
   await refreshAll();
   await refreshCentralControl();
 }
@@ -219,12 +220,16 @@ async function saveImportantFilters() {
   const form = panel.querySelector(".rating-filter-form");
   const min = panel.querySelector(".min-rating");
   const max = panel.querySelector(".max-rating");
+  const league = panel.querySelector(".league-filter");
   max.setCustomValidity(Number(min.value) > Number(max.value) ? "Max, Min değerinden küçük olamaz." : "");
   if (!form.reportValidity() || filtersSaving) return false;
   if (!filtersDirty) return true;
   filtersSaving = true;
   try {
-    const response = await send(modules.find((module) => module.id === "important"), "SET_FILTERS", { minRating: Number(min.value), maxRating: Number(max.value) });
+    const response = await send(modules.find((module) => module.id === "important"), "SET_FILTERS", {
+      minRating: Number(min.value), maxRating: Number(max.value),
+      futbinLeagueId: league.value === "" ? null : Number(league.value)
+    });
     if (!response?.ok) throw new Error(response?.error || "Filtre kaydedilemedi.");
     filtersDirty = false;
     panel.querySelector(".filter-status").textContent = "Kaydedildi";
@@ -234,6 +239,31 @@ async function saveImportantFilters() {
     return false;
   } finally {
     filtersSaving = false;
+  }
+}
+
+async function loadLeagueOptions() {
+  const panel = panels.get("important");
+  const select = panel?.querySelector(".league-filter");
+  if (!select) return;
+  try {
+    const response = await fetch(new URL("league", API_CONFIG.defaultBaseUrl()), { cache: "no-store" });
+    const result = await response.json();
+    if (!response.ok || result?.result === false) throw new Error(result?.message || `Ligler yüklenemedi (HTTP ${response.status}).`);
+    const leagues = Array.isArray(result) ? result : result?.data;
+    if (!Array.isArray(leagues)) throw new Error("Lig API yanıtı beklenen formatta değil.");
+    const leagueOptions = leagues
+      .filter((league) => Number.isInteger(Number(league?.futbin_id)) && Number(league.futbin_id) > 0)
+      .sort((a, b) => String(a?.name?.en || "").localeCompare(String(b?.name?.en || ""), "en", { sensitivity: "base" }));
+    select.replaceChildren(new Option("All leagues", ""));
+    for (const league of leagueOptions) {
+      select.add(new Option(String(league.name?.en || `League ${league.futbin_id}`), String(league.futbin_id)));
+    }
+  } catch (error) {
+    select.replaceChildren(new Option("League list unavailable", ""));
+    select.disabled = true;
+    select.dataset.loadFailed = "true";
+    showToast(error.message || String(error));
   }
 }
 
@@ -299,11 +329,28 @@ function mountPanel(module) {
       const min = Number(panel.querySelector(".min-rating").value);
       const max = Number(panel.querySelector(".max-rating").value);
       if (Number.isInteger(min) && Number.isInteger(max) && min >= 1 && max <= 99 && min <= max) {
-        chrome.storage.local.set({ [IMPORTANT_FILTERS_KEY]: { minRating: min, maxRating: max } });
+        chrome.storage.local.set({ [IMPORTANT_FILTERS_KEY]: {
+          minRating: min, maxRating: max,
+          futbinLeagueId: panel.querySelector(".league-filter").value || null
+        } });
         panel.querySelector(".filter-status").textContent = "Local storage'a kaydedildi";
         queueImportantFilterSave();
       }
     }));
+    panel.querySelector(".league-filter").addEventListener("change", () => {
+      filtersDirty = true;
+      panel.querySelector(".filter-status").textContent = "Kaydedilmedi";
+      const min = Number(panel.querySelector(".min-rating").value);
+      const max = Number(panel.querySelector(".max-rating").value);
+      if (Number.isInteger(min) && Number.isInteger(max) && min >= 1 && max <= 99 && min <= max) {
+        chrome.storage.local.set({ [IMPORTANT_FILTERS_KEY]: {
+          minRating: min, maxRating: max,
+          futbinLeagueId: panel.querySelector(".league-filter").value || null
+        } });
+        panel.querySelector(".filter-status").textContent = "Local storage'a kaydedildi";
+        queueImportantFilterSave();
+      }
+    });
   }
 
   dashboard.appendChild(fragment);
@@ -438,11 +485,20 @@ function renderModule(module, response) {
   panel.dataset.running = state.running ? "true" : "false";
   renderEnvironmentControl();
   if (module.id === "important") {
+    const league = panel.querySelector(".league-filter");
     for (const [selector, value] of [[".min-rating", state.minRating ?? 55], [".max-rating", state.maxRating ?? 99]]) {
       const input = panel.querySelector(selector);
       if (!filtersDirty && !filtersSaving) input.value = value;
       input.disabled = centralSyncEnabled || Boolean(state.running);
     }
+    if (!filtersDirty && !filtersSaving) {
+      const selectedLeagueId = state.futbinLeagueId == null ? "" : String(state.futbinLeagueId);
+      if (selectedLeagueId && ![...league.options].some((option) => option.value === selectedLeagueId)) {
+        league.add(new Option(`League ${selectedLeagueId}`, selectedLeagueId));
+      }
+      league.value = selectedLeagueId;
+    }
+    league.disabled = league.dataset.loadFailed === "true" || centralSyncEnabled || Boolean(state.running);
   }
   const active = centralSyncEnabled
     ? centralActiveModule === module.id
@@ -505,8 +561,14 @@ function renderLines(container, entries, emptyText, isError = false, moduleId = 
       : moduleId === "pricerange" && !isError
         ? safeFutbinUrl(entry?.url)
         : "";
+    const importantFetchUrl = moduleId === "important" && !isError && /^Futbin sekmesi açılıyor:\s*/i.test(message)
+      ? safeFutbinUrl(message.replace(/^Futbin sekmesi açılıyor:\s*/i, ""))
+      : "";
     if (moduleId === "pricerange" && !isError && entry?.eventType === "player-detail-final") {
       return priceRangeDetailLogLine(entry, futbinUrl);
+    }
+    if (importantFetchUrl) {
+      return `<div class="${className}"><time>${escapeHtml(at)}</time><span>Futbin sekmesi açılıyor: <a class="important-futbin-url" href="${escapeHtml(importantFetchUrl)}" target="_blank" rel="noopener noreferrer">${escapeHtml(importantFetchUrl)}</a></span></div>`;
     }
     if (futbinUrl) {
       return `<a class="${className}" href="${escapeHtml(futbinUrl)}" target="_blank" rel="noopener noreferrer"><time>${escapeHtml(at)}</time><span>${escapeHtml(message)}</span></a>`;
