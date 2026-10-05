@@ -638,13 +638,13 @@ function toPayloadPlayer(raw) {
     alternative_positions: (raw.alternativePositions || []).join(","),
     active: true,
     ...futbinMetadataFields(raw),
+    futbin_item_score: raw.futbinItemScore ?? null,
     futbin_asset_id: raw.extractedPlayerImageId ?? null
   };
 }
 function futbinMetadataFields(raw) {
   const fields = {
     futbin_card_revision: raw.futbinCardRevision,
-    futbin_item_score: raw.futbinItemScore,
     futbin_foot: raw.futbinFoot,
     futbin_skill_moves: raw.futbinSkillMoves,
     futbin_weak_foot: raw.futbinWeakFoot

@@ -101,7 +101,7 @@ test("offscreen message parses existing fields; mapper preserves the complete le
     url_img_nation: `${origin}/nation/789.png`, url_img_league: `${origin}/league/dark/456.png`, url_img_club: `${origin}/clubs/dark/123.png`,
     position_name: "CM", quality_code: "gold", nation_name: "Test Nation", league_name: "Test League", club_name: "Test Club",
     alternative_positions: "CAM,CDM", active: true,
-    futbin_asset_id: 999999
+    futbin_asset_id: 999999, futbin_item_score: null
   });
 });
 
@@ -364,4 +364,24 @@ test("manifest service-worker module graph initializes without JavaScript errors
     assert.equal(typeof globalThis.FutbinSyncModuleControls.important.stop, 'function');
   `;
   execFileSync(process.execPath, ["--input-type=module", "-e", script], { timeout: 10000 });
+});
+
+test("Important score survives HTML → POST including zero and missing values", async (t) => {
+  for (const [cell, expected] of [["20", 20], ["0", 0], ["", null], ["N/A", null], [null, null]]) {
+    await t.test(`score ${String(cell)}`, async (t) => {
+      let body;
+      const html = page(row().replace("</tr>", `${cell === null ? "" : `<td class="table-item-score"><div>${cell}<img alt="Item Score"></div></td>`}</tr>`));
+      const h = harness({ fetch: async (url, options) => {
+        if (url.startsWith(origin)) return new Response(html);
+        body = JSON.parse(options.body);
+        return new Response(JSON.stringify({ data: { saved: 1, inserted: 1 } }));
+      } });
+      t.after(() => h.dispose());
+      assert.equal(h.parse(html).players[0].futbinItemScore, expected);
+      await h.evaluate('setState({ ...initialState, running: true, runOnce: true })');
+      await h.worker.runSync(0, apiBase);
+      assert.ok(Object.hasOwn(body.players[0], "futbin_item_score"));
+      assert.equal(body.players[0].futbin_item_score, expected);
+    });
+  }
 });

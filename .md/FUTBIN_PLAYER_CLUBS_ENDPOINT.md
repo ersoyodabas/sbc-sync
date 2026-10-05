@@ -263,3 +263,16 @@ Satir basina parse hatasi (`errors[]`) toplanir ama tum sayfayi durdurmaz; sayfa
 - **Basarisiz batch'te veri kaybi (o round icin)**: 3 denemeden sonra hala basarisiz olan bir 5 sayfalik POST, o run icinde bir daha denenmez; sadece bir sonraki saatlik round'da (sayfalar bastan okunarak) telafi olur.
 - **`disable_missing_delete=true` sabit**: bu endpoint kesinlikle silme yapmadigi icin, Futbin'de artik listelenmeyen (satilmis/kaldirilmis) oyuncular DB'de pasiflestirilmez; bu is (varsa) baska bir pipeline'in sorumlulugundadir.
 - **Maksimum 5 sayfa/istek** sunucu tarafinda sert bir kural (`CRITICAL` -> 422); eklenti tarafi da `PAGE_BATCH_SIZE=5` ile ayni sinira uyumlu calisir — biri degisirse digeri de guncellenmelidir.
+
+## Score alanı (2026-10-05)
+
+Important parser `td.table-item-score` metnini okuyarak `futbinItemScore` üretir.
+POST edilen her oyuncuda `futbin_item_score` alanı tam sayı veya `null` olarak bulunur;
+`0` geçerli bir değerdir. Eksik/boş/okunamayan değer `null` gönderilir.
+
+Backend `FutbinMappedPlayerDto.FutbinItemScore` (`int?`) alanını nullable
+`player.score` (`smallint`, entity `short?`) sütununa eşler. Smallint aralığı
+(-32768..32767) dışındaki değerler oyuncu bazlı doğrulama hatasıyla atlanır;
+diğer geçerli oyuncular kaydedilir. Insert ve update sırasında değer yazılır;
+null veya gönderilmeyen alan mevcut skoru da null ile temizler.
+Oyuncu DTO ve liste/detay yanıtlarında alan `score` adıyla sunulur.
