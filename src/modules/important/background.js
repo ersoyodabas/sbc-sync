@@ -616,7 +616,7 @@ function toPayloadPlayer(raw) {
     futbin_club_id: Number(raw.futbinClubId),
     futbin_league_id: Number(raw.futbinLeagueId),
     futbin_nation_id: Number(raw.futbinNationId),
-    futbin_rarity_id: Number(rarityInfo.futbinId),
+    futbin_rarity_id: ["bronze", "silver", "gold"].includes(qualityCode) ? null : Number(rarityInfo.futbinId),
     name,
     full_name: fullName,
     rating: raw.rating,

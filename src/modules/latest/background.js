@@ -2453,7 +2453,7 @@ function toApiPlayer(player) {
     name: player.name,
     full_name: player.fullName,
     quality_id: player.qualityId,
-    rarity_id: player.rarityId,
+    rarity_id: ["bronze", "silver", "gold"].includes(player.qualityCode) ? null : player.rarityId,
     rating: player.rating,
     fixed_name: player.fixedName,
     futbin_player_id: player.futbinPlayerId,
@@ -2480,7 +2480,8 @@ function validateMappedPlayer(player) {
   if (!player.name) errors.push("player.name okunamadı");
   if (!Number.isInteger(Number(player.futbinPlayerId)) || Number(player.futbinPlayerId) <= 0) errors.push("player.futbin_player_id okunamadı");
   if (!Number.isInteger(Number(player.qualityId)) || Number(player.qualityId) <= 0) errors.push("player.quality_id okunamadı");
-  if (!Number.isInteger(Number(player.rarityId)) || Number(player.rarityId) <= 0) errors.push("player.rarity_id okunamadı");
+  if (!["bronze", "silver", "gold"].includes(player.qualityCode) &&
+      (!Number.isInteger(Number(player.rarityId)) || Number(player.rarityId) <= 0)) errors.push("player.rarity_id okunamadı");
   if (!Number.isInteger(Number(player.rating)) || Number(player.rating) <= 0) errors.push("player.rating okunamadı");
   if (!Number.isInteger(Number(player.positionId)) || Number(player.positionId) <= 0) errors.push("player.position_id okunamadı");
   if (!Number.isInteger(Number(player.nationId)) || Number(player.nationId) <= 0) errors.push("player.nation_id okunamadı");
@@ -2528,12 +2529,13 @@ function mapPlayer(row, lookups) {
 
   const rarity = lookups.rarities.find((item) =>
     item.futbin_id !== null && item.futbin_id !== undefined && Number(item.futbin_id) === rarityFutbinId);
-  if (!rarity) throw new Error(`Rarity bulunamadı! Oyuncu: ${name}, Futbin Rarity ID: ${rarityFutbinId}`);
   const cardQualityCode = normalizeText(parts[1]).toLowerCase();
   const baseRarity = rarityFutbinId === 0 || rarityFutbinId === 1;
   const qualityCode = baseRarity && ["bronze", "silver", "gold"].includes(cardQualityCode)
     ? cardQualityCode
     : "special";
+  const hasBaseQuality = ["bronze", "silver", "gold"].includes(qualityCode);
+  if (!hasBaseQuality && !rarity) throw new Error(`Rarity bulunamadı! Oyuncu: ${name}, Futbin Rarity ID: ${rarityFutbinId}`);
   const quality = lookups.qualities.find((item) => sameLookupText(item.code, qualityCode));
   if (!quality) throw new Error(`Quality bulunamadı! Oyuncu: ${name}, Quality Code: ${qualityCode}`);
 
@@ -2544,7 +2546,7 @@ function mapPlayer(row, lookups) {
     qualityCode,
     qualityIconUrl: quality.icon_url || null,
     qualityImageUrl: baseRarity ? cardImageUrl : SPECIAL_QUALITY_IMAGE_URL,
-    rarityId: Number(rarity.id),
+    rarityId: hasBaseQuality ? null : Number(rarity.id),
     rarityFutbinId,
     rarityCardName: rarityFutbinId === 0
       ? "Common"

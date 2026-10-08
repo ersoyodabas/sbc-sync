@@ -93,7 +93,7 @@ test("offscreen message parses existing fields; mapper preserves the complete le
   assert.deepEqual(plain(parsed.errors), []);
   assert.equal(parsed.players.length, 1);
   assert.deepEqual(plain(h.worker.toPayloadPlayer(parsed.players[0])), {
-    futbin_club_id: 123, futbin_league_id: 456, futbin_nation_id: 789, futbin_rarity_id: 1,
+    futbin_club_id: 123, futbin_league_id: 456, futbin_nation_id: 789, futbin_rarity_id: null,
     name: "Test Player", full_name: "Test Player Full", rating: 82, futbin_player_id: 1001,
     futbin_player_link: `${origin}/27/player/1001/test-player`, url: `${origin}/27/player/1001/test-player`,
     url_img_player: `${origin}/content/fifa27/img/players/999999.png`, price_console: 1200, price_pc: 2500,
@@ -164,7 +164,7 @@ test("captured Futbin FC27 Smith HTML preserves Futbin source metadata", () => {
   assert.equal(payload.futbin_player_id, 14754);
   assert.equal(payload.futbin_club_id, 1938);
   assert.equal(payload.futbin_league_id, 60);
-  assert.equal(payload.futbin_rarity_id, 0);
+  assert.equal(payload.futbin_rarity_id, null);
   assert.equal(payload.position_name, "GK");
   assert.equal(payload.futbin_asset_id, 78402);
   assertNoEaFields(payload);
@@ -186,12 +186,12 @@ test("missing player-image ID is null and Futbin HTML data attributes create no 
 
 test("rarity zero, quality, errors and confirmed-empty parsing remain compatible", () => {
   const h = harness();
-  for (const [card, rating, quality] of [["0_bronze", 60, "bronze"], ["1_silver", 70, "silver"], ["1_gold", 82, "gold"], ["99_special", 90, "special"]]) {
+  for (const [card, rating, quality] of [["0_bronze", 60, "bronze"], ["1_bronze", 60, "bronze"], ["0_silver", 70, "silver"], ["1_silver", 70, "silver"], ["0_gold", 82, "gold"], ["1_gold", 82, "gold"], ["99_special", 90, "special"]]) {
     const raw = h.parse().players[0];
     Object.assign(raw, { futbinRarityId: Number(card.split("_")[0]), cardImageUrl: `${origin}/cards/tiny/${card}.png`, rating });
     const payload = h.worker.toPayloadPlayer(raw);
     assert.equal(payload.quality_code, quality);
-    assert.equal(payload.futbin_rarity_id, raw.futbinRarityId);
+    assert.equal(payload.futbin_rarity_id, quality === "special" ? raw.futbinRarityId : null);
   }
   assert.equal(h.parse('<div class="no-results">No players</div>').confirmedEmpty, true);
   assert.equal(h.parse("<html><body>unexpected response</body></html>").confirmedEmpty, false);
