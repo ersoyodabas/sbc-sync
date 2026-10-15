@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { readFileSync, writeFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import vm from "node:vm";
 import { DOMParser } from "linkedom";
@@ -85,6 +85,35 @@ function harness({ fetch, fastDelays = true, defaultApiBaseUrl = apiBase } = {})
     dispose() { for (const timer of timers) clearTimeout(timer); }
   };
 }
+
+test("captured Pedro 82–82 Serie A HTML produces a repeatable Important Players POST", async (t) => {
+  const bodies = [];
+  const h = harness({ fetch: async (url, options) => {
+    if (url.startsWith(origin)) {
+      assert.equal(new URL(url).searchParams.get("player_rating"), "82-82");
+      assert.equal(new URL(url).searchParams.get("league"), "31");
+      return new Response(read("./fixtures/futbin-important-pedro-serie-a.html"));
+    }
+    bodies.push(JSON.parse(options.body));
+    return new Response(JSON.stringify({ data: { saved: 1, updated: 1 } }));
+  } });
+  t.after(() => h.dispose());
+  for (let i = 0; i < 2; i++) {
+    await h.evaluate('setState({ ...initialState, running: true, runOnce: true, minRating: 82, maxRating: 82, futbinLeagueId: 31 })');
+    await h.worker.runSync(0, apiBase, h.worker.buildSourceUrl(82, 82, 31), 82, 82);
+  }
+  assert.equal(bodies.length, 2);
+  assert.deepEqual(bodies[0], bodies[1]);
+  const body = bodies[0], player = body.players[0];
+  assert.equal(body.sync_mode, "filtered_partial"); assert.equal(body.disable_missing_delete, true);
+  assert.equal(player.name, "Pedro Gonçalves"); assert.equal(player.full_name, "Pedro António Pereira Gonçalves");
+  assert.equal(player.futbin_player_id, 21989); assert.equal(player.futbin_asset_id, 240950);
+  assert.equal(player.futbin_club_id, 110374); assert.equal(player.futbin_league_id, 31);
+  assert.equal(player.position_name, "LM"); assert.equal(player.rating, 82); assert.equal(player.price_console, 700);
+  assert.equal(player.quality_code, "gold"); assert.equal(player.definition_id ?? null, null);
+  // Optional artifact consumed by the isolated PostgreSQL integration test.
+  if (process.env.SBC_PEDRO_PAYLOAD_PATH) writeFileSync(process.env.SBC_PEDRO_PAYLOAD_PATH, JSON.stringify(body));
+});
 
 test("offscreen message parses existing fields; mapper preserves the complete legacy payload", async () => {
   const h = harness();
