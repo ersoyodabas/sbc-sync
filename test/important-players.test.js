@@ -385,3 +385,16 @@ test("Important score survives HTML → POST including zero and missing values",
     });
   }
 });
+
+test("captured Martinelli rows keep three card versions and their independent prices", () => {
+  const h = harness();
+  const parsed = h.parse(read('./fixtures/martinelli-27.html'));
+  assert.deepEqual(plain(parsed.errors), []);
+  const players = parsed.players.map(raw => h.worker.toPayloadPlayer(raw));
+  assert.deepEqual(plain(players.map(p => [p.futbin_player_id, p.futbin_asset_id, p.definition_id ?? null, p.rating, p.price_console])), [
+    [22781, 67360430, 67360430, 82, 22750],
+    [22782, 84137646, 84137646, 82, 12750],
+    [22003, 251566, null, 80, 650],
+  ]);
+  assert.equal(players[2].definition_id, undefined, 'plain portrait cannot prove transferred Gold definition ID');
+});

@@ -292,7 +292,7 @@ function parsePlayerRow(row) {
   if (!idMatch) throw new Error(`[CRITICAL] Futbin ID ayrıştırılamadı! URL: ${playerLink}`);
 
   const fullName = readText(row, "a.table-player-name");
-  const cardPlayerImage = row.querySelector("img.playercard-s-base-img, img.playercard-26-special-img, img[class*='base-img']");
+  const cardPlayerImage = row.querySelector("img.playercard-s-base-img, img[class*='special-img'], img[class*='base-img']");
   const name = normalize(cardPlayerImage?.getAttribute("alt")) || fullName;
   if (!name) throw new Error(`[CRITICAL] Oyuncu ismi okunamadı! ID: ${idMatch[1]}`);
 
@@ -315,7 +315,7 @@ function parsePlayerRow(row) {
   const cardImageUrl = cardImage?.currentSrc || cardImage?.src || "";
   if (!cardImageUrl) throw new Error(`[CRITICAL] Kart görseli bulunamadı! Oyuncu: ${name}`);
 
-  const playerImage = row.querySelector(".table-name img.playercard-s-base-img, img.playercard-26-special-img, img[class*='base-img'], img[src*='/players/']");
+  const playerImage = row.querySelector(".table-name img.playercard-s-base-img, img[class*='special-img'], img[class*='base-img'], img[src*='/players/']");
   const playerImageUrl = firstSrcSetUrl(playerImage?.getAttribute("srcset")) || playerImage?.currentSrc || playerImage?.src || null;
   const leagueImage = row.querySelector(".table-player-league img, img[alt='League']");
   const clubImage = row.querySelector(".table-player-club img, img[alt='Club']");
@@ -324,6 +324,8 @@ function parsePlayerRow(row) {
 
   return {
     futbinPlayerId: Number(idMatch[1]),
+    futbinAssetId: Number(new URL(playerImageUrl || "", "https://www.futbin.com").pathname.match(/\/img\/players\/p?([1-9]\d*)\.png$/i)?.[1]) || null,
+    definitionId: Number(new URL(playerImageUrl || "", "https://www.futbin.com").pathname.match(/\/img\/players\/p([1-9]\d*)\.png$/i)?.[1]) || null,
     futbinPlayerLink: playerLink,
     name,
     fullName,

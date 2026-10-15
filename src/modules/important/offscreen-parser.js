@@ -65,13 +65,14 @@ function parsePlayerRow(row) {
     cardImageAttributes: imageAttributes(cardImg), playerImageAttributes: imageAttributes(playerImg),
     cardImageUrl: image(cardImg), playerImageUrl: image(playerImg),
     extractedPlayerImageId: extractPlayerImageId(image(playerImg)),
+    definitionId: /\/img\/players\/p[1-9]\d*\.png(?:[?#]|$)/i.test(image(playerImg)) ? extractPlayerImageId(image(playerImg)) : null,
     nationImageUrl: image(nationImg), leagueImageUrl: image(leagueImg), clubImageUrl: image(clubImg)
   };
 }
 function extractPlayerImageId(value) {
   try {
     const path = new URL(String(value || ""), "https://www.futbin.com").pathname;
-    const match = path.match(/\/img\/players\/(\d+)\.png$/i);
+    const match = path.match(/\/img\/players\/p?(\d+)\.png$/i);
     if (!match) return null;
     const id = Number(match[1]);
     return Number.isSafeInteger(id) && id > 0 ? id : null;

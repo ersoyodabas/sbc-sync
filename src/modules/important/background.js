@@ -639,6 +639,7 @@ function toPayloadPlayer(raw) {
     active: true,
     ...futbinMetadataFields(raw),
     futbin_item_score: raw.futbinItemScore ?? null,
+    ...(raw.definitionId ? { definition_id: raw.definitionId } : {}),
     futbin_asset_id: raw.extractedPlayerImageId ?? null
   };
 }
