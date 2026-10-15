@@ -12,7 +12,7 @@ const RATING_UPPER_BOUND = 99;
 // was actually configured for the run.
 function buildSourceUrl(minRating, maxRating, futbinLeagueId = null) {
   const leagueId = normalizeFutbinLeagueId(futbinLeagueId);
-  const base = `https://www.futbin.com/27/players?ps_price=200-45000&player_rating=${minRating}-${maxRating}&sort=Player_Rating&order=asc&eUnt=1`;
+  const base = `https://www.futbin.com/27/players?player_rating=${minRating}-${maxRating}&sort=Player_Rating&order=asc&eUnt=1`;
   return leagueId === null ? base : `${base}&league=${leagueId}`;
 }
 function normalizeFutbinLeagueId(value, fallback = null) {
@@ -325,7 +325,7 @@ async function runSync(token, apiBaseUrl, sourceUrl = SOURCE_URL, minRating = DE
         page_from: batchPageFrom, page_to: page, pages_attempted: page - batchPageFrom + 1,
         pages_succeeded: page - batchPageFrom + 1, players, sync_mode: "filtered_partial",
       disable_missing_delete: true, source: "futbin_filtered_players", source_url: sourceUrl,
-      filter: { ps_price: "300-45000", player_rating: `${minRating}-${maxRating}` }
+      filter: { player_rating: `${minRating}-${maxRating}` }
       };
       importantConsole(`API POST payload pages ${batchPageFrom}-${page}`, body);
       let response;

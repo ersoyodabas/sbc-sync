@@ -105,6 +105,17 @@ test("offscreen message parses existing fields; mapper preserves the complete le
   });
 });
 
+test("unknown special rarity preserves its FUTBIN ID and displayed revision for API creation", () => {
+  const h = harness();
+  // Synthetic revision label: the importer must forward the actual page text, never guess from ID 71.
+  const html = row(23213).replace("1_gold.png", "71_special.png")
+    .replace("</td>", '<div class="table-player-revision">Test Revision</div></td>');
+  const payload = h.worker.toPayloadPlayer(h.parse(page(html)).players[0]);
+  assert.equal(payload.futbin_rarity_id, 71);
+  assert.equal(payload.futbin_card_revision, "Test Revision");
+  assert.equal(payload.quality_code, "special");
+});
+
 test("player-image IDs map to futbin_asset_id while Futbin identity and URL remain unchanged", () => {
   const h = harness();
   const extract = (url) => h.parser.extractPlayerImageId(url);
@@ -205,6 +216,7 @@ test("HTML → offscreen → payload → POST keeps five-page batches, dedupe an
   const requests = [], pagesRead = [];
   const h = harness({ fetch: async (url, options) => {
     if (url.startsWith(origin)) {
+      assert.equal(new URL(url).searchParams.has("ps_price"), false);
       const n = Number(new URL(url).searchParams.get("page"));
       pagesRead.push(n);
       const rows = row(1000 + n) + (n === 2 ? row(1001, "9K") : n === 3 ? row(1001, "0").replace("2,500", "0") : n === 6 ? row(1001) : "");
@@ -235,7 +247,8 @@ test("HTML → offscreen → payload → POST keeps five-page batches, dedupe an
     assert.equal(body.sync_mode, "filtered_partial");
     assert.equal(body.disable_missing_delete, true);
     assert.equal(body.source, "futbin_filtered_players");
-    assert.deepEqual(body.filter, { ps_price: "300-45000", player_rating: "55-99" });
+    assert.deepEqual(body.filter, { player_rating: "55-99" });
+    assert.equal(new URL(body.source_url).searchParams.has("ps_price"), false);
     assert.ok(body.players.every((player) => player.futbin_asset_id === 999999));
     for (const player of body.players) assertNoEaFields(player);
   }
