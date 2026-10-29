@@ -55,7 +55,7 @@ function parsePlayerRow(row) {
     futbinLeagueId: assetId(leagueImg, /\/league\/(?:dark\/)?(\d+)\./i) || queryId(leagueLink, "league"),
     futbinNationId: assetId(nationImg, /\/nation\/(\d+)\./i) || queryId(nationLink, "nation"),
     futbinCardRevision: text(row.querySelector(".table-player-revision")) || null,
-    futbinItemScore: optionalInteger(text(row.querySelector("td.table-item-score"))),
+    futbinItemScore: itemScoreInteger(text(row.querySelector("td.table-item-score"))),
     futbinFoot: footImageUrl.match(/\/foot-(left|right)\.svg(?:$|\?)/i)?.[1]?.toLowerCase() || null,
     futbinSkillMoves: optionalInteger(text(row.querySelector("td.table-skills"))),
     futbinWeakFoot: optionalInteger(text(row.querySelector("td.table-weak-foot"))),
@@ -128,3 +128,12 @@ function text(node) { return String(node?.textContent || "").trim().replace(/\s+
 function attr(node, name) { return String(node?.getAttribute(name) || "").trim(); }
 function integer(value) { return Number(String(value || "").match(/\d+/)?.[0]) || 0; }
 function optionalInteger(value) { const match = String(value || "").match(/\d+/); return match ? Number(match[0]) : null; }
+// FUTBIN prints big item scores compactly ("2.1K", "1,2K") or with a thousands separator ("1,234"). Reading only the first digit
+// run turned 2.1K into 2, which made every 85+ card look worthless to the SBC solver.
+function itemScoreInteger(value) {
+  const raw = String(value || "").replace(/\s+/g, "");
+  const compact = raw.match(/^(\d+(?:[.,]\d+)?)([kKmM])$/);
+  if (compact) return Math.round(Number(compact[1].replace(",", ".")) * (/[kK]/.test(compact[2]) ? 1e3 : 1e6));
+  if (/^\d{1,3}(?:[.,]\d{3})+$/.test(raw)) return Number(raw.replace(/[.,]/g, ""));
+  return optionalInteger(raw);
+}

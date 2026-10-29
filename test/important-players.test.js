@@ -409,7 +409,7 @@ test("manifest service-worker module graph initializes without JavaScript errors
 });
 
 test("Important score survives HTML → POST including zero and missing values", async (t) => {
-  for (const [cell, expected] of [["20", 20], ["0", 0], ["", null], ["N/A", null], [null, null]]) {
+  for (const [cell, expected] of [["20", 20], ["0", 0], ["", null], ["N/A", null], [null, null], ["830", 830], ["2.1K", 2100], ["4,3K", 4300], ["12.5k", 12500], ["1,234", 1234], ["1.234", 1234], ["1.5M", 1500000]]) {
     await t.test(`score ${String(cell)}`, async (t) => {
       let body;
       const html = page(row().replace("</tr>", `${cell === null ? "" : `<td class="table-item-score"><div>${cell}<img alt="Item Score"></div></td>`}</tr>`));
