@@ -97,6 +97,36 @@ const modules = [
     extra: { label: "Aç", title: "Aktif Futbin URL'yi aç", icon: "external" },
     hasManualControl: true
   },
+  {
+    id: "market",
+    title: "Futbin Market",
+    color: "#e5707e",
+    icon: "activity",
+    operations: [],
+    stateKey: "marketSyncState",
+    snapshotState(response) {
+      return response?.state || {};
+    },
+    logs(response, state) {
+      return state?.logs || [];
+    },
+    errors(_response, state) {
+      return state?.errors || [];
+    },
+    metrics(state) {
+      return [
+        ["Parsed", num(state.parsedPlayers)],
+        ["Saved", num(state.savedPlayers)],
+        ["Skipped", num(state.skippedPlayers)],
+        ["Eşleşmeyen", num(state.unmatchedPlayers)]
+      ];
+    },
+    progress(state) {
+      return state.running ? 50 : state.completedAt ? 100 : 0;
+    },
+    extra: { label: "Aç", title: "Futbin Market sayfasını aç", icon: "external" },
+    hasManualControl: true
+  },
 ];
 
 const panels = new Map();
@@ -451,6 +481,10 @@ async function extraAction(module) {
   }
   if (module.id === "pricerange") {
     await chrome.tabs.create({ url: "https://www.futbin.com/26/priceranges?page=1", active: true });
+    return;
+  }
+  if (module.id === "market") {
+    await chrome.tabs.create({ url: "https://www.futbin.com/market", active: true });
     return;
   }
   const url = state.futbinChallengeUrl || state.currentUrl || state.queue?.[state.currentJobIndex]?.url;

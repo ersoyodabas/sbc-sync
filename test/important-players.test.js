@@ -402,7 +402,7 @@ test("manifest service-worker module graph initializes without JavaScript errors
     };
     await import(${JSON.stringify(entry)});
     await globalThis.FutbinSyncApiConfig.ready;
-    assert.deepEqual(Object.keys(globalThis.FutbinSyncModuleControls).sort(), ['important', 'latest', 'pricerange']);
+    assert.deepEqual(Object.keys(globalThis.FutbinSyncModuleControls).sort(), ['important', 'latest', 'market', 'pricerange']);
     assert.equal(typeof globalThis.FutbinSyncModuleControls.important.stop, 'function');
   `;
   execFileSync(process.execPath, ["--input-type=module", "-e", script], { timeout: 10000 });
