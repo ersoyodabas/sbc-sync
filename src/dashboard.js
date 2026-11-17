@@ -158,6 +158,7 @@ let moduleEnabled = {};
 const isModuleEnabled = (moduleId) => moduleEnabled[moduleId] !== false;
 
 init();
+installSelfHealing();
 setInterval(renderCountdowns, 1000);
 setInterval(refreshAll, 2500);
 
@@ -387,8 +388,23 @@ function mountPanel(module) {
   panels.set(module.id, panel);
 }
 
-async function refreshAll() {
-  await Promise.all(modules.map((module) => refreshModule(module)));
+// The 2.5 s poll and every storage change both call this; coalesce them so a slow service worker can't pile up
+// overlapping snapshot requests (and the detached DOM/response copies they hold) over days.
+let refreshInFlight = null;
+let refreshQueued = false;
+function refreshAll() {
+  if (refreshInFlight) {
+    refreshQueued = true;
+    return refreshInFlight;
+  }
+  refreshInFlight = Promise.all(modules.map((module) => refreshModule(module))).finally(() => {
+    refreshInFlight = null;
+    if (refreshQueued) {
+      refreshQueued = false;
+      void refreshAll();
+    }
+  });
+  return refreshInFlight;
 }
 
 async function refreshModule(module) {
@@ -1032,4 +1048,63 @@ function escapeHtml(value) {
     "\"": "&quot;",
     "'": "&#039;"
   })[character]);
+}
+
+
+// ---- Self-healing -----------------------------------------------------------------------------------------------
+// The dashboard stays open for days. A crashed renderer ("Aw, Snap!") is reloaded by the service worker watchdog
+// (src/watchdog.js, which pings this page); here the page also reloads itself before it gets there: on a burst of
+// uncaught errors, when its JS heap balloons, and after a long uptime. Sync state lives in the service worker and
+// chrome.storage, so a reload never interrupts a run.
+const SELF_HEAL = {
+  maxErrors: 6,
+  errorWindowMs: 60_000,
+  heapLimitBytes: 600 * 1024 * 1024,
+  maxUptimeMs: 12 * 60 * 60 * 1000,
+  checkEveryMs: 60_000,
+  minReloadGapMs: 60_000,
+  storageKey: "fcSyncDashboardLastReload"
+};
+
+function installSelfHealing() {
+  chrome.runtime.onMessage.addListener((message, _sender, respond) => {
+    if (message?.futbinSyncModule !== "fc-sync-dashboard" || message.type !== "PING") return false;
+    respond({ ok: true });
+    return false;
+  });
+
+  const errorTimes = [];
+  const onFailure = (reason) => {
+    const now = Date.now();
+    errorTimes.push(now);
+    while (errorTimes.length && now - errorTimes[0] > SELF_HEAL.errorWindowMs) errorTimes.shift();
+    if (errorTimes.length >= SELF_HEAL.maxErrors) reloadDashboard(`hata: ${reason}`);
+  };
+  window.addEventListener("error", (event) => onFailure(event.message || "error"));
+  window.addEventListener("unhandledrejection", (event) => onFailure(String(event.reason?.message || event.reason || "rejection")));
+
+  const startedAt = Date.now();
+  setInterval(() => {
+    const heap = performance.memory?.usedJSHeapSize || 0;
+    if (heap > SELF_HEAL.heapLimitBytes) reloadDashboard("bellek");
+    else if (Date.now() - startedAt > SELF_HEAL.maxUptimeMs && !userIsEditing()) reloadDashboard("uzun çalışma süresi");
+  }, SELF_HEAL.checkEveryMs);
+}
+
+function userIsEditing() {
+  const active = document.activeElement;
+  return filtersDirty || filtersSaving || Boolean(active && /^(INPUT|SELECT|TEXTAREA)$/.test(active.tagName));
+}
+
+function reloadDashboard(reason) {
+  // Never loop: if we already reloaded a moment ago, leave it to the next check.
+  try {
+    const last = Number(sessionStorage.getItem(SELF_HEAL.storageKey) || 0);
+    if (Date.now() - last < SELF_HEAL.minReloadGapMs) return;
+    sessionStorage.setItem(SELF_HEAL.storageKey, String(Date.now()));
+  } catch {
+    // sessionStorage unavailable: reload anyway, the uptime/heap checks restart from zero after it
+  }
+  console.warn(`FC Sync dashboard yeniden yükleniyor (${reason})`);
+  location.reload();
 }

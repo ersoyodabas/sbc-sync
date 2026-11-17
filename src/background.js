@@ -3,6 +3,7 @@ import "./modules/important/background.js";
 import "./modules/latest/background.js";
 import "./modules/pricerange/background.js";
 import "./modules/market/background.js";
+import "./watchdog.js";
 
 const FC_SYNC_ENABLED_KEY = "fcSyncEnabled";
 const ORCHESTRATOR_KEY = "fcSyncOrchestratorState";
