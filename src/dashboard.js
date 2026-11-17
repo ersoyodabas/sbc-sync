@@ -157,6 +157,20 @@ const IMPORTANT_FILTERS_KEY = "importantPlayersFilters";
 let moduleEnabled = {};
 const isModuleEnabled = (moduleId) => moduleEnabled[moduleId] !== false;
 
+// Declared before init() on purpose: let/const are not hoisted, and init()/installSelfHealing() run during load.
+// A TDZ error here aborts the whole script and leaves every panel stuck on "Durum okunuyor".
+let refreshInFlight = null;
+let refreshQueued = false;
+const SELF_HEAL = {
+  maxErrors: 6,
+  errorWindowMs: 60_000,
+  heapLimitBytes: 600 * 1024 * 1024,
+  maxUptimeMs: 12 * 60 * 60 * 1000,
+  checkEveryMs: 60_000,
+  minReloadGapMs: 60_000,
+  storageKey: "fcSyncDashboardLastReload"
+};
+
 init();
 installSelfHealing();
 setInterval(renderCountdowns, 1000);
@@ -390,8 +404,6 @@ function mountPanel(module) {
 
 // The 2.5 s poll and every storage change both call this; coalesce them so a slow service worker can't pile up
 // overlapping snapshot requests (and the detached DOM/response copies they hold) over days.
-let refreshInFlight = null;
-let refreshQueued = false;
 function refreshAll() {
   if (refreshInFlight) {
     refreshQueued = true;
@@ -1056,16 +1068,6 @@ function escapeHtml(value) {
 // (src/watchdog.js, which pings this page); here the page also reloads itself before it gets there: on a burst of
 // uncaught errors, when its JS heap balloons, and after a long uptime. Sync state lives in the service worker and
 // chrome.storage, so a reload never interrupts a run.
-const SELF_HEAL = {
-  maxErrors: 6,
-  errorWindowMs: 60_000,
-  heapLimitBytes: 600 * 1024 * 1024,
-  maxUptimeMs: 12 * 60 * 60 * 1000,
-  checkEveryMs: 60_000,
-  minReloadGapMs: 60_000,
-  storageKey: "fcSyncDashboardLastReload"
-};
-
 function installSelfHealing() {
   chrome.runtime.onMessage.addListener((message, _sender, respond) => {
     if (message?.futbinSyncModule !== "fc-sync-dashboard" || message.type !== "PING") return false;
